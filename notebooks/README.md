@@ -1,60 +1,90 @@
 # Model Training Guide
 
-This directory contains resources to train and fine-tune Ultralytics YOLO object-detection models for car damage detection. You have two primary options for training.
+This project trains two YOLO26 instance-segmentation models:
+
+- `modal_car_damage_detection_training.py`: damage segmentation on the DrBimmer dataset. Default model: `yolo26n-seg.pt`.
+- `modal_car_parts_segmentation_training.py`: vehicle-part segmentation. Default model: `yolo26n-seg.pt`.
+
+Both models are required by the API. Detection-only YOLO and RT-DETR checkpoints are not compatible with this segmentation pipeline.
 
 ## Prerequisites
-*   **No local GPU required**: Both training methods execute entirely in the cloud.
-*   **Automatic Data Provisioning**: The 6GB CarDD dataset is hosted on Google Drive. Both the Colab notebook and the Modal script will download and format this dataset automatically. You do not need to download it manually.
-*   **Accounts**: You will need a Modal account (for Option 1) or a free Google account (for Option 2).
 
-## Option 1: Modal (Serverless & Automated) - ⭐ Recommended
+```bash
+python3.11 -m venv venv_modal
+source venv_modal/bin/activate
+pip install modal
+modal setup
+```
 
-If you prefer an automated, hands-off cloud training pipeline, you can use the `modal_train.py` script. We highly recommend this option because it leverages [Modal](https://modal.com) to automatically provision much more powerful cloud GPUs (like the H100 or A100) to significantly speed up training. The script will dynamically download and process the dataset, train the model, and persist the results entirely in the cloud.
+No local GPU is required. Modal downloads, extracts, and converts the source archive while building each training image, then runs training on an H100. Each app mounts only its own output volume.
 
-### Setup
-1. Create an account on Modal.
-2. Install the Modal client locally:
-   ```bash
-   # Create virtual env
-   python3.11 -m venv venv_modal
-   source venv_modal/bin/activate
+## Damage Segmentation Training
 
-   pip install modal
-   ```
-3. Authenticate your CLI:
-   ```bash
-   modal setup
-   ```
+The image build runs `mkdir -p /opt/datasets/source`, then `gdown 1fswe1oGs1GtZ_fifiQWf2OWwX_CX5v6d -O /tmp/data.zip` and `unzip -qq /tmp/data.zip -d /opt/datasets/source`. A Modal `run_function` converts the annotated 8-class subset into YOLO segmentation labels and bakes them into the same image. The converter selects the source by the annotation `classTitle` values, not by the archive folder name. A stable filename hash creates 70%/20%/10% train/validation/test splits. Model artifacts are stored only in `car-damage-segmentation-output-vol`.
 
-### Run the Training Job
-Execute the following command from the root of the project:
 ```bash
 cd notebooks
-# Run with the default object-detection model (YOLOv8m)
-modal run modal_train.py
-
-# Or specify a different YOLO detection model:
-modal run modal_train.py --model-name yolo11m.pt
-
-# Optionally set the seed for reproducibility:
-modal run modal_train.py --model-name yolov8m.pt --seed 42
+modal run modal_car_damage_detection_training.py
 ```
 
-> [!NOTE]
-> The first time you run this, Modal will build the container image. During the image build phase, it will download the 6GB dataset and convert COCO bounding boxes to YOLO object-detection labels. This will take ~5-10 minutes. Subsequent runs will be nearly instantaneous as the dataset is permanently "baked" into the image.
+Train a larger model or tune parameters:
 
-### Retrieve Your Model
-The training script saves the output to a persistent Modal Volume named `car-damage-training-vol`. To download your newly trained weights to your local machine, run:
 ```bash
-modal volume get car-damage-training-vol /car_damage_finetuned/weights/best.pt ./models/best.pt
+modal run modal_car_damage_detection_training.py \
+  --model-name yolo26m-seg.pt \
+  --epochs 100 \
+  --imgsz 640 \
+  --batch 16 \
+  --seed 42
 ```
 
-## Option 2: Google Colab (Interactive)
+The Modal function requests 8 CPUs and uses 8 data-loader workers. Training is non-deterministic by default to retain fast GPU kernels.
 
-The interactive Jupyter Notebook (`training.ipynb`) provides a step-by-step workflow for fine-tuning the model using a free GPU on Google Colab.
+Retrieve the default run:
 
-1. Go to [Google Colab](https://colab.research.google.com/).
-2. Upload the `training.ipynb` file from this directory.
-3. In Colab, go to **Runtime > Change runtime type** and select a **T4 GPU** or **V100/A100 GPU** if available.
-4. Run all the cells in the notebook.
-5. Once training completes, you can download the final `best.pt` weights and place it in the `models/` directory of your project.
+```bash
+modal volume get car-damage-segmentation-output-vol \
+  /car_damage_yolo26n_seg/weights/best.pt \
+  ../models/car_damage_yolo26_seg.pt
+```
+
+## Car-Parts Segmentation Training
+
+This app builds its own image from the same ZIP. Its Modal `run_function` selects the 21-class subset by annotation `classTitle`, converts it into YOLO segmentation labels, and bakes the result into that image. It uses the same deterministic 70%/20%/10% split policy. Model artifacts are stored only in `car-parts-segmentation-output-vol`.
+
+```bash
+cd notebooks
+modal run modal_car_parts_segmentation_training.py
+```
+
+Use a larger checkpoint when needed:
+
+```bash
+modal run modal_car_parts_segmentation_training.py \
+  --model-name yolo26m-seg.pt \
+  --epochs 100 \
+  --imgsz 640 \
+  --batch 8 \
+  --seed 42
+```
+
+Retrieve the default run:
+
+```bash
+modal volume get car-parts-segmentation-output-vol \
+  /car_parts_yolo26n_seg/weights/best.pt \
+  ../models/car_parts_yolo26_seg.pt
+```
+
+## Serving After Training
+
+From the repository root:
+
+```bash
+export DAMAGE_MODEL_PATH="./models/car_damage_yolo26_seg.pt"
+export PARTS_MODEL_PATH="./models/car_parts_yolo26_seg.pt"
+export PART_COVERAGE_THRESHOLD="0.50"
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+The API selects the part with the highest damage-mask coverage and returns the standard mask IoU as `part_iou`. Coverage, rather than IoU, is the acceptance metric because damage masks are normally contained in much larger vehicle-part masks.
