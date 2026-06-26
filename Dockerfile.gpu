@@ -4,7 +4,9 @@ FROM python:3.11-slim
 # Prevent Python from writing pyc files to disc and enable live stream logs
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    MODEL_PATH="/app/models/best.pt" \
+    DAMAGE_MODEL_PATH="/app/models/car_damage_yolo26_seg.pt" \
+    PARTS_MODEL_PATH="/app/models/car_parts_yolo26_seg.pt" \
+    PART_COVERAGE_THRESHOLD="0.50" \
     PORT=8000
 
 WORKDIR /app
@@ -32,7 +34,7 @@ RUN mkdir -p /app/models && \
 RUN chown -R appuser:appuser /app
 
 ENV MPLCONFIGDIR="/tmp/matplotlib-cache" \
-    YOLO_CONFIG_DIR="/tmp/yolo-config"
+    YOLO_CONFIG_DIR="/tmp"
 
 # Copy application files
 COPY --chown=appuser:appuser app/ /app/app/

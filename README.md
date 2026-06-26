@@ -1,134 +1,102 @@
-# Car Damage Detection
+# Car Damage Assessment API
 ![cover](./assets/cover.gif)
 
-A production-grade, containerized FastAPI microservice designed to serve YOLO object detection inference. This repository is structured for seamless local development and Docker-based container deployments.
-
-## Table of Contents
-- [Key Features](#key-features)
-- [Getting Started](#getting-started)
-- [Development](#development)
-- [Training](#training)
-- [API Documentation](docs/API.md)
+A containerized FastAPI service for automated car damage assessment. It runs two fine-tuned YOLO26 instance-segmentation models trained from the DrBimmer car-parts-and-damage polygon dataset: one for damage categories and one for vehicle parts.
 
 ## Key Features
 
-- **High-Performance Framework**: Built with **FastAPI** and served via **Uvicorn** for asynchronous request handling.
-- **Optimized Lifespan Management**: Model weights are loaded once at startup and cleared gracefully from memory on shutdown.
-- **Robust Observability**: Structured JSON error responses and system-level logging are implemented for predictability and production monitoring.
-- **Secure Containerization**: Configured with a multi-layered Docker setup that runs as a non-privileged system user (`appuser`).
-- **Production-Ready Endpoints**: Includes structured health probes (`/health`) and OpenAPI specification-compliant output payloads.
+- **Two segmentation models**: YOLO26 damage and vehicle-part instance segmentation.
+- **Mask-aware assessment**: Each damage response includes its polygon, matched part polygon, containment coverage, and mask IoU.
+- **Production API surface**: FastAPI, startup checkpoint validation, health checks, structured errors, and CPU/GPU Docker images.
+- **Modal training**: Reproducible cloud training scripts for both segmentation models.
 
+## Model Weights
 
----
+Place both segmentation checkpoints in `models/`:
 
-## Getting Started
-
-The recommended way to run this microservice is via Docker. We provide configurations for both CPU and GPU deployment.
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/tamnvcc/car-damage-detection.git
-cd car-damage-detection
-```
-
-### 2. Model Weights Setup
-Place your trained YOLO model weight file (e.g., `best.pt` or `best.onnx`) inside the `models/` directory:
 ```bash
 mkdir -p models
-cp /path/to/your/trained/weights.pt models/best.pt
+cp /path/to/car_damage_best.pt models/car_damage_yolo26_seg.pt
+cp /path/to/car_parts_best.pt models/car_parts_yolo26_seg.pt
 ```
 
-### 3. Run with Docker (CPU)
+Runtime configuration:
 
-**Build the Docker Image**
-Execute the build command in the root directory where the `Dockerfile` resides:
 ```bash
-docker build -t car-damage-detection:1.0.0 .
+export DAMAGE_MODEL_PATH="./models/car_damage_yolo26_seg.pt"
+export PARTS_MODEL_PATH="./models/car_parts_yolo26_seg.pt"
+export PART_COVERAGE_THRESHOLD="0.50"
 ```
 
-**Run the Container**
-Start the container while mounting the host `models` directory. This allows you to update or swap the weights on the host without rebuilding the container.
+Both checkpoints must have Ultralytics task `segment`. `MODEL_PATH` remains supported as a fallback for `DAMAGE_MODEL_PATH`.
+
+## Run with Docker
 
 ```bash
+docker build -t car-damage-assessment:1.0.0 .
 docker run -d \
   -p 8000:8000 \
   -v $(pwd)/models:/app/models \
-  --name car-damage-detector \
-  car-damage-detection:1.0.0
+  --name car-damage-assessment \
+  car-damage-assessment:1.0.0
 ```
 
-### 4. Run with Docker (GPU)
+For GPU inference:
 
-For deployment on a GPU-enabled server, use the dedicated GPU Dockerfile (`Dockerfile.gpu`). Ensure you have the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed on your host system.
-
-**Build the GPU Image**
 ```bash
-docker build -t car-damage-detection:1.0.0-gpu -f Dockerfile.gpu .
-```
-
-**Run the GPU Container**
-Start the container and attach all available GPUs by adding the `--gpus all` flag:
-```bash
+docker build -t car-damage-assessment:1.0.0-gpu -f Dockerfile.gpu .
 docker run -d \
   --gpus all \
   -p 8000:8000 \
   -v $(pwd)/models:/app/models \
-  --name car-damage-detector-gpu \
-  car-damage-detection:1.0.0-gpu
+  --name car-damage-assessment-gpu \
+  car-damage-assessment:1.0.0-gpu
 ```
 
----
-
-## Development
-
-For local testing or development without Docker:
+## Local Development
 
 ```bash
-# Create and activate virtual environment
 python3.11 -m venv venv
 source venv/bin/activate
 
-# Install pytorch
 # CPU
 pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
-
-# GPU
-pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-
-
-# Install other dependencies
 pip install -r requirements.txt
 
-# Run the API locally
-export MODEL_PATH="./models/best.pt"
+export DAMAGE_MODEL_PATH="./models/car_damage_yolo26_seg.pt"
+export PARTS_MODEL_PATH="./models/car_parts_yolo26_seg.pt"
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
-The API documentation will be available at: [http://localhost:8000/docs](http://localhost:8000/docs)
 
+OpenAPI documentation is at [http://localhost:8000/docs](http://localhost:8000/docs).
 
-Quick test
+## Quick Test
+
 ```bash
-# cURL
-curl -X POST "http://localhost:8000/predict" \
-     -H "accept: application/json" \
-     -H "Content-Type: multipart/form-data" \
-     -F "file=@/path/to/image.jpg"
-
-# or run python script
-python test.py /path/to/image.jpg
+python test.py /path/to/image.jpg --save --window-width 1400 --window-height 900
 ```
 
----
+The client draws damage masks in orange, matched part masks in green, and damage boxes in red.
 
 ## Training
 
-We provide a complete object-detection training and fine-tuning pipeline for Ultralytics YOLO models on the CarDD dataset. We highly recommend running a fully automated, serverless training job using **Modal** for access to powerful GPUs (e.g., H100/A100). Alternatively, you can train the model interactively using **Google Colab**.
+```bash
+cd notebooks
 
-For complete setup instructions, training scripts, and dataset preparation, please refer to the [Training Guide](notebooks/README.md).
+# Damage segmentation, default YOLO26n-seg
+modal run modal_car_damage_detection_training.py
 
----
+# Vehicle-part segmentation, default YOLO26n-seg
+modal run modal_car_parts_segmentation_training.py
+```
 
-## API Documentation
+Retrieve the checkpoints:
 
-For detailed information on the available endpoints, expected payloads, and error handling, please refer to the [API Documentation](docs/API.md).
+```bash
+modal volume get car-damage-segmentation-output-vol \
+  /car_damage_yolo26n_seg/weights/best.pt ./models/car_damage_yolo26_seg.pt
+modal volume get car-parts-segmentation-output-vol \
+  /car_parts_yolo26n_seg/weights/best.pt ./models/car_parts_yolo26_seg.pt
+```
+
+See [notebooks/README.md](notebooks/README.md) for training details and [docs/API.md](docs/API.md) for the API contract.
