@@ -1,7 +1,16 @@
 # Car Damage Assessment API
-![cover](./assets/cover.gif)
+![Car damage assessment example](./assets/cover.jpg)
 
 A containerized FastAPI service for automated car damage assessment. It runs two fine-tuned YOLO26 instance-segmentation models trained from the DrBimmer car-parts-and-damage polygon dataset: one for damage categories and one for vehicle parts.
+
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Model Weights](#model-weights)
+- [Run with Docker](#run-with-docker)
+- [Local Development](#local-development)
+- [Quick Test](#quick-test)
+- [Training](#training)
 
 ## Key Features
 
@@ -39,6 +48,12 @@ docker run -d \
   -v $(pwd)/models:/app/models \
   --name car-damage-assessment \
   car-damage-assessment:1.0.0
+```
+
+After the container has been created, restart it and attach to its logs with:
+
+```bash
+docker start -a car-damage-assessment
 ```
 
 For GPU inference:
