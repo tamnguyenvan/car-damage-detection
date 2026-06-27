@@ -1,0 +1,43 @@
+{
+  "id2label": {
+    "0": "background",
+    "1": "scratch",
+    "2": "dent",
+    "3": "crack",
+    "4": "glass shatter",
+    "5": "lamp broken",
+    "6": "tire flat"
+  },
+  "label2id": {
+    "background": 0,
+    "scratch": 1,
+    "dent": 2,
+    "crack": 3,
+    "glass shatter": 4,
+    "lamp broken": 5,
+    "tire flat": 6
+  },
+  "classes": [
+    "background",
+    "scratch",
+    "dent",
+    "crack",
+    "glass shatter",
+    "lamp broken",
+    "tire flat"
+  ],
+  "split_counts": {
+    "train": {
+      "images": 2816,
+      "segments": 6211
+    },
+    "val": {
+      "images": 810,
+      "segments": 1744
+    },
+    "test": {
+      "images": 374,
+      "segments": 785
+    }
+  }
+}

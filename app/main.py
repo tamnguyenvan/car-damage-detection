@@ -15,8 +15,13 @@ from ultralytics import YOLO
 from app.schemas import DetectionResult, InferenceResponse
 
 SERVICE_NAME = "car_damage_assessment"
-DEFAULT_DAMAGE_MODEL_PATH = "/app/models/car_damage_yolo26_seg.pt"
+DEFAULT_DAMAGE_MODEL_PATH = "/app/models/car_damage_segformer"
 DEFAULT_PARTS_MODEL_PATH = "/app/models/car_parts_yolo26_seg.pt"
+DAMAGE_MIN_AREA = int(os.getenv("DAMAGE_MIN_AREA", "16"))
+DAMAGE_CONFIDENCE_THRESHOLD = float(os.getenv("DAMAGE_CONFIDENCE_THRESHOLD", "0.30"))
+DAMAGE_ROI_ENABLED = os.getenv("DAMAGE_ROI_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+DAMAGE_ROI_PADDING_RATIO = float(os.getenv("DAMAGE_ROI_PADDING_RATIO", "0.08"))
+DAMAGE_ROI_MIN_PADDING = int(os.getenv("DAMAGE_ROI_MIN_PADDING", "32"))
 
 DAMAGE_MODEL_PATH = os.getenv("DAMAGE_MODEL_PATH", os.getenv("MODEL_PATH", DEFAULT_DAMAGE_MODEL_PATH))
 PARTS_MODEL_PATH = os.getenv("PARTS_MODEL_PATH", DEFAULT_PARTS_MODEL_PATH)
@@ -44,25 +49,46 @@ class SegmentationPrediction:
     polygon: Optional[list[list[float]]]
 
 
+@dataclass(frozen=True)
+class DamageSegformerBundle:
+    model: Any
+    processor: Any
+    device: str
+    id2label: dict[int, str]
+
+
 def _class_name(names: Any, class_id: int) -> str:
     if isinstance(names, dict):
-        return str(names.get(class_id, class_id))
+        return str(names.get(class_id, names.get(str(class_id), class_id)))
     if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
         return str(names[class_id])
     return str(class_id)
 
 
-def _load_segmentation_model(model_path: str, model_label: str) -> YOLO:
+def _load_parts_segmentation_model(model_path: str) -> YOLO:
     model = YOLO(model_path)
     model_task = getattr(model, "task", None)
     if model_task != "segment":
         raise ValueError(
-            f"Expected a {model_label} segmentation checkpoint, but loaded task={model_task!r}."
+            f"Expected a car-parts segmentation checkpoint, but loaded task={model_task!r}."
         )
     return model
 
 
-def _predict_model(model: YOLO, image: np.ndarray, imgsz: int):
+def _load_damage_segformer_model(model_path: str) -> DamageSegformerBundle:
+    import torch
+    from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+
+    processor = SegformerImageProcessor.from_pretrained(model_path)
+    model = SegformerForSemanticSegmentation.from_pretrained(model_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    model.eval()
+    id2label = {int(index): label for index, label in model.config.id2label.items()}
+    return DamageSegformerBundle(model=model, processor=processor, device=device, id2label=id2label)
+
+
+def _predict_parts_model(model: YOLO, image: np.ndarray, imgsz: int):
     return model.predict(image, imgsz=imgsz)
 
 
@@ -70,7 +96,7 @@ def _predict_model(model: YOLO, image: np.ndarray, imgsz: int):
 async def lifespan(app: FastAPI):
     global damage_model, parts_model
 
-    logger.info("Initializing damage segmentation model from: %s", DAMAGE_MODEL_PATH)
+    logger.info("Initializing SegFormer damage segmentation model from: %s", DAMAGE_MODEL_PATH)
     logger.info("Initializing car-parts segmentation model from: %s", PARTS_MODEL_PATH)
     try:
         if not os.path.exists(DAMAGE_MODEL_PATH):
@@ -78,9 +104,9 @@ async def lifespan(app: FastAPI):
         if not os.path.exists(PARTS_MODEL_PATH):
             raise FileNotFoundError(f"Car-parts model weight file not found at: {PARTS_MODEL_PATH}")
 
-        damage_model = _load_segmentation_model(DAMAGE_MODEL_PATH, "damage")
-        parts_model = _load_segmentation_model(PARTS_MODEL_PATH, "car-parts")
-        logger.info("Damage and car-parts segmentation models successfully loaded.")
+        damage_model = _load_damage_segformer_model(DAMAGE_MODEL_PATH)
+        parts_model = _load_parts_segmentation_model(PARTS_MODEL_PATH)
+        logger.info("SegFormer damage and YOLO car-parts segmentation models successfully loaded.")
     except Exception as exc:
         logger.critical("Inference engine startup failed: %s", exc, exc_info=True)
         raise
@@ -95,10 +121,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Car Damage Assessment API",
     description=(
-        "Microservice endpoint for car-damage and car-parts instance segmentation "
-        "with mask-based vehicle-part attribution."
+        "Microservice endpoint for SegFormer car-damage semantic segmentation and "
+        "YOLO car-parts instance segmentation "
+        "with part-mask ROI cropping and mask-based vehicle-part attribution."
     ),
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
 
@@ -161,6 +188,107 @@ def _mask_metrics(
     if damage_area == 0 or union == 0:
         return 0.0, 0.0
     return float(intersection / damage_area), float(intersection / union)
+
+
+def _full_image_roi(image_shape: tuple[int, int] | tuple[int, int, int]) -> tuple[int, int, int, int]:
+    height, width = image_shape[:2]
+    return 0, 0, width, height
+
+
+def _prediction_bbox_from_mask_or_box(
+    prediction: SegmentationPrediction,
+    image_shape: tuple[int, int] | tuple[int, int, int],
+) -> Optional[tuple[int, int, int, int]]:
+    height, width = image_shape[:2]
+    if prediction.mask is not None:
+        mask = _mask_for_image(prediction.mask, image_shape)
+        ys, xs = np.where(mask)
+        if len(xs) and len(ys):
+            return int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)
+
+    if not prediction.box or len(prediction.box) != 4:
+        return None
+
+    x1, y1, x2, y2 = prediction.box
+    x1 = max(0, min(width, int(np.floor(x1))))
+    y1 = max(0, min(height, int(np.floor(y1))))
+    x2 = max(0, min(width, int(np.ceil(x2))))
+    y2 = max(0, min(height, int(np.ceil(y2))))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _damage_roi_from_parts(
+    parts: list[SegmentationPrediction],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+    padding_ratio: float = DAMAGE_ROI_PADDING_RATIO,
+    min_padding: int = DAMAGE_ROI_MIN_PADDING,
+) -> tuple[int, int, int, int]:
+    height, width = image_shape[:2]
+    boxes = [
+        bbox
+        for part in parts
+        if (bbox := _prediction_bbox_from_mask_or_box(part, image_shape)) is not None
+    ]
+    if not boxes:
+        return _full_image_roi(image_shape)
+
+    x1 = min(box[0] for box in boxes)
+    y1 = min(box[1] for box in boxes)
+    x2 = max(box[2] for box in boxes)
+    y2 = max(box[3] for box in boxes)
+
+    roi_width = x2 - x1
+    roi_height = y2 - y1
+    padding = max(min_padding, int(round(max(roi_width, roi_height) * max(0.0, padding_ratio))))
+    return (
+        max(0, x1 - padding),
+        max(0, y1 - padding),
+        min(width, x2 + padding),
+        min(height, y2 + padding),
+    )
+
+
+def _project_damage_predictions_to_image(
+    damages: list[SegmentationPrediction],
+    roi: tuple[int, int, int, int],
+    image_shape: tuple[int, int] | tuple[int, int, int],
+) -> list[SegmentationPrediction]:
+    x1, y1, x2, y2 = roi
+    roi_shape = (y2 - y1, x2 - x1)
+    height, width = image_shape[:2]
+    projected: list[SegmentationPrediction] = []
+
+    for damage in damages:
+        full_mask = None
+        if damage.mask is not None:
+            roi_mask = _mask_for_image(damage.mask, roi_shape).astype(np.uint8)
+            full_mask = np.zeros((height, width), dtype=np.uint8)
+            full_mask[y1:y2, x1:x2] = roi_mask
+
+        box = [
+            max(0.0, min(float(width), damage.box[0] + x1)),
+            max(0.0, min(float(height), damage.box[1] + y1)),
+            max(0.0, min(float(width), damage.box[2] + x1)),
+            max(0.0, min(float(height), damage.box[3] + y1)),
+        ]
+        polygon = (
+            [[float(x + x1), float(y + y1)] for x, y in damage.polygon]
+            if damage.polygon is not None
+            else None
+        )
+        projected.append(
+            SegmentationPrediction(
+                box=box,
+                confidence=damage.confidence,
+                class_id=damage.class_id,
+                class_name=damage.class_name,
+                mask=full_mask,
+                polygon=polygon,
+            )
+        )
+    return projected
 
 
 def match_damage_to_part(
@@ -270,6 +398,70 @@ def _extract_segmentation_predictions(
     return predictions
 
 
+def _predict_damage_segformer(bundle: DamageSegformerBundle, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    import torch
+    import torch.nn.functional as functional
+
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    inputs = bundle.processor(images=rgb_image, return_tensors="pt")
+    inputs = {key: value.to(bundle.device) for key, value in inputs.items()}
+    with torch.no_grad():
+        outputs = bundle.model(**inputs)
+
+    logits = functional.interpolate(
+        outputs.logits,
+        size=image.shape[:2],
+        mode="bilinear",
+        align_corners=False,
+    )
+    probabilities = torch.softmax(logits, dim=1)[0].detach().cpu().numpy()
+    semantic_map = probabilities.argmax(axis=0).astype(np.uint8)
+    return semantic_map, probabilities
+
+
+def _extract_damage_predictions_from_semantic_map(
+    semantic_map: np.ndarray,
+    probabilities: np.ndarray,
+    id2label: dict[int, str],
+    min_area: int = DAMAGE_MIN_AREA,
+    confidence_threshold: float = DAMAGE_CONFIDENCE_THRESHOLD,
+) -> list[SegmentationPrediction]:
+    predictions: list[SegmentationPrediction] = []
+    for class_id, class_name in sorted(id2label.items()):
+        if class_id == 0:
+            continue
+        class_mask = (semantic_map == class_id).astype(np.uint8)
+        if class_mask.sum() < min_area:
+            continue
+
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(class_mask, connectivity=8)
+        for component_id in range(1, component_count):
+            area = int(stats[component_id, cv2.CC_STAT_AREA])
+            if area < min_area:
+                continue
+
+            component_mask = (labels == component_id).astype(np.uint8)
+            confidence = float(probabilities[class_id][component_mask.astype(bool)].mean())
+            if confidence < confidence_threshold:
+                continue
+
+            x = int(stats[component_id, cv2.CC_STAT_LEFT])
+            y = int(stats[component_id, cv2.CC_STAT_TOP])
+            width = int(stats[component_id, cv2.CC_STAT_WIDTH])
+            height = int(stats[component_id, cv2.CC_STAT_HEIGHT])
+            predictions.append(
+                SegmentationPrediction(
+                    box=[float(x), float(y), float(x + width), float(y + height)],
+                    confidence=confidence,
+                    class_id=class_id,
+                    class_name=str(class_name),
+                    mask=component_mask,
+                    polygon=_polygon_from_mask(component_mask),
+                )
+            )
+    return predictions
+
+
 def _assessment_detections(
     damages: list[SegmentationPrediction],
     parts: list[SegmentationPrediction],
@@ -326,11 +518,37 @@ async def predict_damage(file: UploadFile = File(...)):
                 detail="Model is temporarily unavailable.",
             )
 
-        logger.info("Starting damage and car-parts segmentation...")
-        damage_results = await run_in_threadpool(_predict_model, damage_model, image, INFERENCE_IMAGE_SIZE)
-        parts_results = await run_in_threadpool(_predict_model, parts_model, image, INFERENCE_IMAGE_SIZE)
-        damages = _extract_segmentation_predictions(damage_results[0], image.shape) if damage_results else []
+        logger.info("Starting YOLO car-parts segmentation and SegFormer damage ROI segmentation...")
+        parts_results = await run_in_threadpool(_predict_parts_model, parts_model, image, INFERENCE_IMAGE_SIZE)
         parts = _extract_segmentation_predictions(parts_results[0], image.shape) if parts_results else []
+        damage_roi = (
+            _damage_roi_from_parts(parts, image.shape)
+            if DAMAGE_ROI_ENABLED
+            else _full_image_roi(image.shape)
+        )
+        roi_x1, roi_y1, roi_x2, roi_y2 = damage_roi
+        damage_image = image[roi_y1:roi_y2, roi_x1:roi_x2]
+        if damage_image.size == 0:
+            logger.warning("Computed an empty damage ROI %s; falling back to full-image SegFormer inference.", damage_roi)
+            damage_roi = _full_image_roi(image.shape)
+            roi_x1, roi_y1, roi_x2, roi_y2 = damage_roi
+            damage_image = image
+
+        logger.info(
+            "Running SegFormer on damage ROI x=%d y=%d w=%d h=%d from %d part instance(s).",
+            roi_x1,
+            roi_y1,
+            roi_x2 - roi_x1,
+            roi_y2 - roi_y1,
+            len(parts),
+        )
+        semantic_map, damage_probabilities = await run_in_threadpool(_predict_damage_segformer, damage_model, damage_image)
+        damages = _extract_damage_predictions_from_semantic_map(
+            semantic_map,
+            damage_probabilities,
+            damage_model.id2label,
+        )
+        damages = _project_damage_predictions_to_image(damages, damage_roi, image.shape)
         detections = _assessment_detections(damages, parts, image.shape)
 
         logger.info("Inference executed. Segmented %d damage instance(s).", len(detections))

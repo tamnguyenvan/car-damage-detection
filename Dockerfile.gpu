@@ -4,8 +4,13 @@ FROM python:3.11-slim
 # Prevent Python from writing pyc files to disc and enable live stream logs
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DAMAGE_MODEL_PATH="/app/models/car_damage_yolo26_seg.pt" \
+    DAMAGE_MODEL_PATH="/app/models/car_damage_segformer" \
     PARTS_MODEL_PATH="/app/models/car_parts_yolo26_seg.pt" \
+    DAMAGE_MIN_AREA="16" \
+    DAMAGE_CONFIDENCE_THRESHOLD="0.30" \
+    DAMAGE_ROI_ENABLED="true" \
+    DAMAGE_ROI_PADDING_RATIO="0.08" \
+    DAMAGE_ROI_MIN_PADDING="32" \
     PART_COVERAGE_THRESHOLD="0.50" \
     PORT=8000
 

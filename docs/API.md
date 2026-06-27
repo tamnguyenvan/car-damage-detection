@@ -1,6 +1,6 @@
 # API Documentation
 
-The service runs two YOLO26 instance-segmentation models: one segments damage categories and the other segments vehicle parts. Each damage mask is attributed to the part containing the greatest fraction of its pixels.
+The service runs a Hugging Face SegFormer semantic-segmentation model for damage categories and a YOLO26 instance-segmentation model for vehicle parts. SegFormer damage maps are split into connected regions, and each damage region is attributed to the part containing the greatest fraction of its pixels.
 
 ## Endpoints
 
@@ -69,12 +69,16 @@ curl -X POST http://localhost:8000/predict \
 
 Set `PART_COVERAGE_THRESHOLD` to control the minimum coverage needed for a matched part. The default is `0.50`.
 
+Set `DAMAGE_CONFIDENCE_THRESHOLD` to filter low-confidence SegFormer damage regions and `DAMAGE_MIN_AREA` to drop tiny connected components.
+
+By default, the API runs car-parts segmentation first, builds a padded ROI around the detected part masks, runs SegFormer on that crop, and maps damage masks back to original image coordinates. This preserves more detail for full-scene photos than resizing the whole image into SegFormer's input size. Set `DAMAGE_ROI_ENABLED=false` to disable the crop. Tune the crop with `DAMAGE_ROI_PADDING_RATIO` and `DAMAGE_ROI_MIN_PADDING`.
+
 ## Detection Fields
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `box` | `number[]` | Damage bounding box as `[x1, y1, x2, y2]`. |
-| `confidence` | `number` | Damage segmentation confidence. |
+| `confidence` | `number` | Mean SegFormer class probability over the damage region. |
 | `class_id` | `integer` | Damage class ID. |
 | `class_name` | `string` | Damage class name. |
 | `damage_polygon` | `number[][] | null` | Image-coordinate polygon of the damage mask. |
