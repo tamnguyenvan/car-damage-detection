@@ -9,6 +9,18 @@ class DetectionResult(BaseModel):
     confidence: float = Field(..., description="Model confidence score")
     class_id: int = Field(..., description="ID of predicted class")
     class_name: str = Field(..., description="Name of predicted class")
+    damage_label: Optional[str] = Field(
+        default=None,
+        description="Display label for the damage, pluralized when multiple same-class regions are merged",
+    )
+    damage_count: int = Field(
+        default=1,
+        description="Number of same-class damage regions merged into this result",
+    )
+    display_label: Optional[str] = Field(
+        default=None,
+        description="Human-readable part and damage label, such as 'Front-bumper: dents'",
+    )
     damage_polygon: Optional[List[List[float]]] = Field(
         default=None,
         description="Image-coordinate polygon of the damage segmentation mask",

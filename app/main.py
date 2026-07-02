@@ -27,6 +27,19 @@ DAMAGE_MODEL_PATH = os.getenv("DAMAGE_MODEL_PATH", os.getenv("MODEL_PATH", DEFAU
 PARTS_MODEL_PATH = os.getenv("PARTS_MODEL_PATH", DEFAULT_PARTS_MODEL_PATH)
 PART_COVERAGE_THRESHOLD = float(os.getenv("PART_COVERAGE_THRESHOLD", "0.50"))
 INFERENCE_IMAGE_SIZE = int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))
+DAMAGE_SUPPRESSION_PRIORITY = {
+    "scratch": 1,
+    "dent": 2,
+    "crack": 3,
+}
+DAMAGE_PLURAL_LABELS = {
+    "crack": "cracks",
+    "dent": "dents",
+    "glass shatter": "glass shatters",
+    "lamp broken": "broken lamps",
+    "scratch": "scratches",
+    "tire flat": "flat tires",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,12 +70,38 @@ class DamageSegformerBundle:
     id2label: dict[int, str]
 
 
+@dataclass(frozen=True)
+class MatchedDamage:
+    damage: SegmentationPrediction
+    matched_part: Optional[SegmentationPrediction]
+    part_index: Optional[int]
+    coverage: Optional[float]
+    iou: Optional[float]
+
+
 def _class_name(names: Any, class_id: int) -> str:
     if isinstance(names, dict):
         return str(names.get(class_id, names.get(str(class_id), class_id)))
     if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
         return str(names[class_id])
     return str(class_id)
+
+
+def _normalize_damage_name(class_name: str) -> str:
+    return " ".join(str(class_name).replace("_", " ").replace("-", " ").strip().lower().split())
+
+
+def _damage_display_label(class_name: str, count: int) -> str:
+    canonical_name = _normalize_damage_name(class_name)
+    if count <= 1:
+        return canonical_name
+    return DAMAGE_PLURAL_LABELS.get(canonical_name, f"{canonical_name}s")
+
+
+def _result_display_label(damage_label: str, matched_part: Optional[SegmentationPrediction]) -> str:
+    if matched_part is None:
+        return damage_label
+    return f"{matched_part.class_name}: {damage_label}"
 
 
 def _load_parts_segmentation_model(model_path: str) -> YOLO:
@@ -318,11 +357,20 @@ def match_damage_to_part(
     return best_part, best_coverage, best_iou
 
 
-def _polygon_from_mask(mask: np.ndarray) -> Optional[list[list[float]]]:
+def _polygon_from_mask(mask: np.ndarray, merge_disconnected: bool = False) -> Optional[list[list[float]]]:
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    contour = max(contours, key=cv2.contourArea).reshape(-1, 2)
+    if merge_disconnected:
+        valid_contours = [contour.reshape(-1, 2) for contour in contours if len(contour) >= 3]
+        if not valid_contours:
+            return None
+        contour_points = np.vstack(valid_contours)
+        if len(contour_points) < 3:
+            return None
+        contour = cv2.convexHull(contour_points).reshape(-1, 2)
+    else:
+        contour = max(contours, key=cv2.contourArea).reshape(-1, 2)
     if len(contour) < 3:
         return None
     return [[float(x), float(y)] for x, y in contour.tolist()]
@@ -462,29 +510,163 @@ def _extract_damage_predictions_from_semantic_map(
     return predictions
 
 
+def _damage_box_from_mask(mask: np.ndarray) -> list[float]:
+    ys, xs = np.where(mask.astype(bool))
+    if len(xs) == 0 or len(ys) == 0:
+        return [0.0, 0.0, 0.0, 0.0]
+    return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
+
+
+def _merge_boxes(boxes: list[list[float]]) -> list[float]:
+    return [
+        float(min(box[0] for box in boxes)),
+        float(min(box[1] for box in boxes)),
+        float(max(box[2] for box in boxes)),
+        float(max(box[3] for box in boxes)),
+    ]
+
+
+def _damage_area(damage: SegmentationPrediction) -> int:
+    if damage.mask is None:
+        return 0
+    return int(np.asarray(damage.mask).astype(bool).sum())
+
+
+def _match_damages_to_parts(
+    damages: list[SegmentationPrediction],
+    parts: list[SegmentationPrediction],
+    image_shape: tuple[int, int, int],
+) -> list[MatchedDamage]:
+    part_index_by_identity = {id(part): index for index, part in enumerate(parts)}
+    matched_damages = []
+    for damage in damages:
+        matched_part, coverage, iou = match_damage_to_part(damage.mask, parts, image_shape)
+        matched_damages.append(
+            MatchedDamage(
+                damage=damage,
+                matched_part=matched_part,
+                part_index=part_index_by_identity.get(id(matched_part)) if matched_part else None,
+                coverage=coverage,
+                iou=iou,
+            )
+        )
+    return matched_damages
+
+
+def _suppress_lower_priority_damage(matched_damages: list[MatchedDamage]) -> list[MatchedDamage]:
+    max_priority_by_part: dict[int, int] = {}
+    for matched_damage in matched_damages:
+        if matched_damage.part_index is None:
+            continue
+        damage_name = _normalize_damage_name(matched_damage.damage.class_name)
+        priority = DAMAGE_SUPPRESSION_PRIORITY.get(damage_name)
+        if priority is None:
+            continue
+        max_priority_by_part[matched_damage.part_index] = max(
+            max_priority_by_part.get(matched_damage.part_index, priority),
+            priority,
+        )
+
+    filtered = []
+    for matched_damage in matched_damages:
+        if matched_damage.part_index is None:
+            filtered.append(matched_damage)
+            continue
+        damage_name = _normalize_damage_name(matched_damage.damage.class_name)
+        priority = DAMAGE_SUPPRESSION_PRIORITY.get(damage_name)
+        if priority is None or priority >= max_priority_by_part.get(matched_damage.part_index, priority):
+            filtered.append(matched_damage)
+    return filtered
+
+
+def _group_damage_by_part_and_class(matched_damages: list[MatchedDamage]) -> list[list[MatchedDamage]]:
+    grouped: dict[tuple[object, str], list[MatchedDamage]] = {}
+    for index, matched_damage in enumerate(matched_damages):
+        part_key: object = matched_damage.part_index if matched_damage.part_index is not None else f"unmatched-{index}"
+        damage_name = _normalize_damage_name(matched_damage.damage.class_name)
+        grouped.setdefault((part_key, damage_name), []).append(matched_damage)
+    return list(grouped.values())
+
+
+def _build_detection_from_group(
+    group: list[MatchedDamage],
+    image_shape: tuple[int, int, int],
+) -> DetectionResult:
+    representative = group[0].damage
+    matched_part = group[0].matched_part
+    count = len(group)
+    if count == 1:
+        damage_label = _damage_display_label(representative.class_name, count)
+        return DetectionResult(
+            box=representative.box,
+            confidence=representative.confidence,
+            class_id=representative.class_id,
+            class_name=representative.class_name,
+            damage_label=damage_label,
+            damage_count=count,
+            display_label=_result_display_label(damage_label, matched_part),
+            damage_polygon=representative.polygon,
+            car_part=matched_part.class_name if matched_part else None,
+            part_confidence=matched_part.confidence if matched_part else None,
+            part_coverage=group[0].coverage,
+            part_iou=group[0].iou,
+            car_part_polygon=matched_part.polygon if matched_part else None,
+        )
+
+    masks = [
+        _mask_for_image(matched_damage.damage.mask, image_shape)
+        for matched_damage in group
+        if matched_damage.damage.mask is not None
+    ]
+    merged_mask = np.logical_or.reduce(masks).astype(np.uint8) if masks else None
+
+    if merged_mask is not None and merged_mask.any():
+        box = _damage_box_from_mask(merged_mask)
+        damage_polygon = _polygon_from_mask(merged_mask, merge_disconnected=len(group) > 1)
+    else:
+        box = _merge_boxes([matched_damage.damage.box for matched_damage in group])
+        damage_polygon = representative.polygon
+
+    weights = [max(1, _damage_area(matched_damage.damage)) for matched_damage in group]
+    confidence = float(
+        np.average(
+            [matched_damage.damage.confidence for matched_damage in group],
+            weights=weights,
+        )
+    )
+
+    coverage = None
+    iou = None
+    if matched_part is not None and merged_mask is not None:
+        coverage, iou = _mask_metrics(merged_mask, matched_part.mask, image_shape) if matched_part.mask is not None else (None, None)
+
+    damage_label = _damage_display_label(representative.class_name, count)
+    return DetectionResult(
+        box=box,
+        confidence=confidence,
+        class_id=representative.class_id,
+        class_name=representative.class_name,
+        damage_label=damage_label,
+        damage_count=count,
+        display_label=_result_display_label(damage_label, matched_part),
+        damage_polygon=damage_polygon,
+        car_part=matched_part.class_name if matched_part else None,
+        part_confidence=matched_part.confidence if matched_part else None,
+        part_coverage=coverage,
+        part_iou=iou,
+        car_part_polygon=matched_part.polygon if matched_part else None,
+    )
+
+
 def _assessment_detections(
     damages: list[SegmentationPrediction],
     parts: list[SegmentationPrediction],
     image_shape: tuple[int, int, int],
 ) -> list[DetectionResult]:
-    detections = []
-    for damage in damages:
-        matched_part, coverage, iou = match_damage_to_part(damage.mask, parts, image_shape)
-        detections.append(
-            DetectionResult(
-                box=damage.box,
-                confidence=damage.confidence,
-                class_id=damage.class_id,
-                class_name=damage.class_name,
-                damage_polygon=damage.polygon,
-                car_part=matched_part.class_name if matched_part else None,
-                part_confidence=matched_part.confidence if matched_part else None,
-                part_coverage=coverage,
-                part_iou=iou,
-                car_part_polygon=matched_part.polygon if matched_part else None,
-            )
-        )
-    return detections
+    matched_damages = _match_damages_to_parts(damages, parts, image_shape)
+    filtered_damages = _suppress_lower_priority_damage(matched_damages)
+    groups = _group_damage_by_part_and_class(filtered_damages)
+    return [_build_detection_from_group(group, image_shape) for group in groups]
 
 
 @app.post(

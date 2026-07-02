@@ -18,11 +18,11 @@ from app.main import (
 )
 
 
-def prediction(name: str, mask: np.ndarray | None, polygon=None) -> SegmentationPrediction:
+def prediction(name: str, mask: np.ndarray | None, polygon=None, class_id: int = 8) -> SegmentationPrediction:
     return SegmentationPrediction(
         box=[10, 10, 60, 60],
         confidence=0.92,
-        class_id=8,
+        class_id=class_id,
         class_name=name,
         mask=mask,
         polygon=polygon,
@@ -111,6 +111,78 @@ class PartMatchingTests(unittest.TestCase):
         self.assertEqual(detections[0].car_part, "front_bumper")
         self.assertEqual(detections[0].car_part_polygon, part.polygon)
         self.assertEqual(detections[0].part_coverage, 1.0)
+
+    def test_assessment_merges_same_damage_on_same_part_and_pluralizes_label(self):
+        scratch_a = np.zeros((100, 100), dtype=np.uint8)
+        scratch_a[20:30, 20:30] = 1
+        scratch_b = np.zeros((100, 100), dtype=np.uint8)
+        scratch_b[35:45, 40:50] = 1
+        part_mask = np.zeros((100, 100), dtype=np.uint8)
+        part_mask[10:60, 10:60] = 1
+
+        detections = _assessment_detections(
+            [
+                prediction("scratch", scratch_a, class_id=5),
+                prediction("scratch", scratch_b, class_id=5),
+            ],
+            [prediction("left-fender", part_mask)],
+            (100, 100, 3),
+        )
+
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(detections[0].class_name, "scratch")
+        self.assertEqual(detections[0].damage_label, "scratches")
+        self.assertEqual(detections[0].damage_count, 2)
+        self.assertEqual(detections[0].display_label, "left-fender: scratches")
+        self.assertEqual(detections[0].car_part, "left-fender")
+        self.assertEqual(detections[0].box, [20.0, 20.0, 50.0, 45.0])
+        self.assertEqual(detections[0].part_coverage, 1.0)
+
+    def test_assessment_suppresses_scratch_when_dent_exists_on_same_part(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:30, 20:30] = 1
+        dent_mask = np.zeros((100, 100), dtype=np.uint8)
+        dent_mask[35:50, 35:50] = 1
+        part_mask = np.zeros((100, 100), dtype=np.uint8)
+        part_mask[10:60, 10:60] = 1
+
+        detections = _assessment_detections(
+            [
+                prediction("scratch", scratch_mask, class_id=5),
+                prediction("dent", dent_mask, class_id=2),
+            ],
+            [prediction("left-fender", part_mask)],
+            (100, 100, 3),
+        )
+
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(detections[0].class_name, "dent")
+        self.assertEqual(detections[0].damage_label, "dent")
+
+    def test_assessment_suppresses_dent_and_scratch_when_crack_exists_on_same_part(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:30, 20:30] = 1
+        dent_mask = np.zeros((100, 100), dtype=np.uint8)
+        dent_mask[35:50, 35:50] = 1
+        crack_mask = np.zeros((100, 100), dtype=np.uint8)
+        crack_mask[50:58, 45:55] = 1
+        glass_mask = np.zeros((100, 100), dtype=np.uint8)
+        glass_mask[15:25, 45:55] = 1
+        part_mask = np.zeros((100, 100), dtype=np.uint8)
+        part_mask[10:65, 10:65] = 1
+
+        detections = _assessment_detections(
+            [
+                prediction("scratch", scratch_mask, class_id=5),
+                prediction("dent", dent_mask, class_id=2),
+                prediction("crack", crack_mask, class_id=1),
+                prediction("glass shatter", glass_mask, class_id=3),
+            ],
+            [prediction("left-fender", part_mask)],
+            (100, 100, 3),
+        )
+
+        self.assertEqual([detection.class_name for detection in detections], ["crack", "glass shatter"])
 
     def test_semantic_damage_map_extracts_connected_components(self):
         semantic_map = np.zeros((100, 100), dtype=np.uint8)

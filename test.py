@@ -50,9 +50,11 @@ def _draw_detection(image, detection: dict) -> None:
     x2 = max(0, min(x2, image_width - 1))
     y2 = max(0, min(y2, image_height - 1))
 
-    damage_label = f"Damage: {detection['class_name']} {detection['confidence']:.2f}"
+    damage_name = detection.get("damage_label") or detection["class_name"]
     car_part = detection.get("car_part")
+    summary_label = detection.get("display_label")
     if car_part:
+        summary_label = summary_label or f"{car_part}: {damage_name}"
         part_confidence = detection.get("part_confidence")
         coverage = detection.get("part_coverage")
         iou = detection.get("part_iou")
@@ -64,7 +66,9 @@ def _draw_detection(image, detection: dict) -> None:
         if iou is not None:
             part_label += f" | IoU {iou:.2f}"
     else:
+        summary_label = summary_label or f"Damage: {damage_name}"
         part_label = "Part: no match"
+    damage_label = f"{summary_label} {detection['confidence']:.2f}"
 
     cv2.rectangle(image, (x1, y1), (x2, y2), DAMAGE_COLOR, thickness=2)
     _draw_label(image, [damage_label, part_label], x1, y1, DAMAGE_COLOR)
@@ -126,8 +130,11 @@ def process_and_visualize(
             match_details += f", coverage={coverage:.2f}"
         if iou is not None:
             match_details += f", IoU={iou:.2f}"
+        damage_name = detection.get("damage_label") or detection["class_name"]
+        damage_count = int(detection.get("damage_count") or 1)
+        count_details = f", merged={damage_count}" if damage_count > 1 else ""
         print(
-            f"  {index}. damage={detection['class_name']} ({detection['confidence']:.2f}), "
+            f"  {index}. damage={damage_name} ({detection['confidence']:.2f}{count_details}), "
             f"car part={car_part}{match_details}"
         )
         _draw_segmentation(image, detection.get("damage_polygon"), DAMAGE_MASK_COLOR)
