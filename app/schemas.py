@@ -33,7 +33,7 @@ class DetectionResult(BaseModel):
     )
     display_label: Optional[str] = Field(
         default=None,
-        description="Human-readable part and damage label, such as 'Front-bumper: dents'",
+        description="Human-readable part and damage label, such as 'Frontbumper: dents'",
     )
     damage_polygon: Optional[List[List[float]]] = Field(
         default=None,

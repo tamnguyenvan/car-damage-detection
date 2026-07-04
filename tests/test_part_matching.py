@@ -19,10 +19,17 @@ from app.main import (
 )
 
 
-def prediction(name: str, mask: np.ndarray | None, polygon=None, class_id: int = 8) -> SegmentationPrediction:
+def prediction(
+    name: str,
+    mask: np.ndarray | None,
+    polygon=None,
+    class_id: int = 8,
+    confidence: float = 0.92,
+    box: list[float] | None = None,
+) -> SegmentationPrediction:
     return SegmentationPrediction(
-        box=[10, 10, 60, 60],
-        confidence=0.92,
+        box=box or [10, 10, 60, 60],
+        confidence=confidence,
         class_id=class_id,
         class_name=name,
         mask=mask,
@@ -39,12 +46,12 @@ class PartMatchingTests(unittest.TestCase):
 
         matched_part, coverage, iou = match_damage_to_part(
             damage_mask,
-            [prediction("front_bumper", part_mask)],
+            [prediction("Frontbumper", part_mask)],
             (100, 100, 3),
             threshold=0.5,
         )
 
-        self.assertEqual(matched_part.class_name, "front_bumper")
+        self.assertEqual(matched_part.class_name, "Frontbumper")
         self.assertEqual(coverage, 1.0)
         self.assertAlmostEqual(iou, 400 / 2500)
 
@@ -56,7 +63,7 @@ class PartMatchingTests(unittest.TestCase):
 
         matched_part, coverage, iou = match_damage_to_part(
             damage_mask,
-            [prediction("hood", part_mask)],
+            [prediction("Bonnet", part_mask)],
             (100, 100, 3),
             threshold=0.5,
         )
@@ -70,7 +77,7 @@ class PartMatchingTests(unittest.TestCase):
 
         matched_part, coverage, iou = match_damage_to_part(
             None,
-            [prediction("wheel", part_mask)],
+            [prediction("Wheel", part_mask)],
             (100, 100, 3),
         )
 
@@ -104,12 +111,12 @@ class PartMatchingTests(unittest.TestCase):
         part_mask = np.zeros((100, 100), dtype=np.uint8)
         part_mask[10:60, 10:60] = 1
         damage = prediction("dent", damage_mask, [[20.0, 20.0], [40.0, 20.0], [40.0, 40.0]])
-        part = prediction("front_bumper", part_mask, [[10.0, 10.0], [60.0, 10.0], [60.0, 60.0]])
+        part = prediction("Frontbumper", part_mask, [[10.0, 10.0], [60.0, 10.0], [60.0, 60.0]])
 
         detections = _assessment_detections([damage], [part], (100, 100, 3))
 
         self.assertEqual(detections[0].damage_polygon, damage.polygon)
-        self.assertEqual(detections[0].car_part, "front_bumper")
+        self.assertEqual(detections[0].car_part, "Frontbumper")
         self.assertEqual(detections[0].car_part_polygon, part.polygon)
         self.assertEqual(detections[0].part_coverage, 1.0)
 
@@ -126,7 +133,7 @@ class PartMatchingTests(unittest.TestCase):
                 prediction("scratch", scratch_a, class_id=5),
                 prediction("scratch", scratch_b, class_id=5),
             ],
-            [prediction("left-fender", part_mask)],
+            [prediction("Frontfender", part_mask)],
             (100, 100, 3),
         )
 
@@ -134,8 +141,8 @@ class PartMatchingTests(unittest.TestCase):
         self.assertEqual(detections[0].class_name, "scratch")
         self.assertEqual(detections[0].damage_label, "scratches")
         self.assertEqual(detections[0].damage_count, 2)
-        self.assertEqual(detections[0].display_label, "left-fender: scratches")
-        self.assertEqual(detections[0].car_part, "left-fender")
+        self.assertEqual(detections[0].display_label, "Frontfender: scratches")
+        self.assertEqual(detections[0].car_part, "Frontfender")
         self.assertEqual(detections[0].box, [20.0, 20.0, 50.0, 45.0])
         self.assertEqual(detections[0].part_coverage, 1.0)
 
@@ -152,7 +159,7 @@ class PartMatchingTests(unittest.TestCase):
                 prediction("scratch", scratch_mask, class_id=5),
                 prediction("dent", dent_mask, class_id=2),
             ],
-            [prediction("left-fender", part_mask)],
+            [prediction("Frontfender", part_mask)],
             (100, 100, 3),
         )
 
@@ -179,7 +186,7 @@ class PartMatchingTests(unittest.TestCase):
                 prediction("crack", crack_mask, class_id=1),
                 prediction("glass shatter", glass_mask, class_id=3),
             ],
-            [prediction("left-fender", part_mask)],
+            [prediction("Frontfender", part_mask)],
             (100, 100, 3),
         )
 
@@ -196,18 +203,18 @@ class PartMatchingTests(unittest.TestCase):
         detections = _assessment_detections(
             [prediction("scratch", scratch_mask, class_id=5)],
             [
-                prediction("left-fender", left_part_mask),
-                prediction("front-door", right_part_mask),
+                prediction("Frontfender", left_part_mask),
+                prediction("Frontdoor", right_part_mask),
             ],
             (100, 100, 3),
         )
 
         detections_by_part = {detection.car_part: detection for detection in detections}
-        self.assertEqual(set(detections_by_part), {"left-fender", "front-door"})
-        self.assertEqual(detections_by_part["left-fender"].box, [20.0, 20.0, 50.0, 40.0])
-        self.assertEqual(detections_by_part["front-door"].box, [50.0, 20.0, 70.0, 40.0])
-        self.assertEqual(detections_by_part["left-fender"].part_coverage, 1.0)
-        self.assertEqual(detections_by_part["front-door"].part_coverage, 1.0)
+        self.assertEqual(set(detections_by_part), {"Frontfender", "Frontdoor"})
+        self.assertEqual(detections_by_part["Frontfender"].box, [20.0, 20.0, 50.0, 40.0])
+        self.assertEqual(detections_by_part["Frontdoor"].box, [50.0, 20.0, 70.0, 40.0])
+        self.assertEqual(detections_by_part["Frontfender"].part_coverage, 1.0)
+        self.assertEqual(detections_by_part["Frontdoor"].part_coverage, 1.0)
 
     def test_assessment_removes_damage_outside_all_parts(self):
         scratch_mask = np.zeros((100, 100), dtype=np.uint8)
@@ -217,11 +224,56 @@ class PartMatchingTests(unittest.TestCase):
 
         detections = _assessment_detections(
             [prediction("scratch", scratch_mask, class_id=5)],
-            [prediction("left-fender", part_mask)],
+            [prediction("Frontfender", part_mask)],
             (100, 100, 3),
         )
 
         self.assertEqual(detections, [])
+
+    def test_assessment_merges_duplicate_part_instances_before_clipping(self):
+        dent_mask = np.zeros((100, 100), dtype=np.uint8)
+        dent_mask[20:40, 20:60] = 1
+        lamp_mask_a = np.zeros((100, 100), dtype=np.uint8)
+        lamp_mask_a[10:50, 10:45] = 1
+        lamp_mask_b = np.zeros((100, 100), dtype=np.uint8)
+        lamp_mask_b[10:50, 35:70] = 1
+
+        detections = _assessment_detections(
+            [prediction("dent", dent_mask, class_id=2, box=[20.0, 20.0, 60.0, 40.0])],
+            [
+                prediction("Rearlamp", lamp_mask_a, confidence=0.94),
+                prediction("Rearlamp", lamp_mask_b, confidence=0.67),
+            ],
+            (100, 100, 3),
+        )
+
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(detections[0].class_name, "dent")
+        self.assertEqual(detections[0].damage_count, 1)
+        self.assertEqual(detections[0].car_part, "Rearlamp")
+        self.assertEqual(detections[0].part_confidence, 0.94)
+        self.assertEqual(detections[0].box, [20.0, 20.0, 60.0, 40.0])
+
+    def test_assessment_drops_tiny_clipped_part_fragments(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:40, 20:80] = 1
+        main_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        main_part_mask[10:50, 10:79] = 1
+        sliver_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        sliver_part_mask[10:50, 79:80] = 1
+
+        detections = _assessment_detections(
+            [prediction("scratch", scratch_mask, class_id=5)],
+            [
+                prediction("Frontfender", main_part_mask),
+                prediction("Rearbumper", sliver_part_mask),
+            ],
+            (100, 100, 3),
+        )
+
+        self.assertEqual(len(detections), 1)
+        self.assertEqual(detections[0].car_part, "Frontfender")
+        self.assertEqual(detections[0].box, [20.0, 20.0, 79.0, 40.0])
 
     def test_assessment_suppression_happens_after_part_clipping(self):
         scratch_mask = np.zeros((100, 100), dtype=np.uint8)
@@ -239,14 +291,14 @@ class PartMatchingTests(unittest.TestCase):
                 prediction("crack", crack_mask, class_id=1),
             ],
             [
-                prediction("left-fender", left_part_mask),
-                prediction("front-door", right_part_mask),
+                prediction("Frontfender", left_part_mask),
+                prediction("Frontdoor", right_part_mask),
             ],
             (100, 100, 3),
         )
 
         labels_by_part = {detection.car_part: detection.class_name for detection in detections}
-        self.assertEqual(labels_by_part, {"left-fender": "crack", "front-door": "scratch"})
+        self.assertEqual(labels_by_part, {"Frontfender": "crack", "Frontdoor": "scratch"})
 
     def test_simplified_detections_keep_part_damage_and_points_only(self):
         scratch_mask = np.zeros((100, 100), dtype=np.uint8)
@@ -256,19 +308,19 @@ class PartMatchingTests(unittest.TestCase):
 
         detections = _assessment_detections(
             [prediction("scratch", scratch_mask, class_id=5)],
-            [prediction("left-fender", part_mask)],
+            [prediction("Frontfender", part_mask)],
             (100, 100, 3),
         )
         simplified = _simplify_detections(detections)
 
         self.assertEqual(len(simplified), 1)
-        self.assertEqual(simplified[0].part_name, "left-fender")
+        self.assertEqual(simplified[0].part_name, "Frontfender")
         self.assertEqual(simplified[0].damage_name, "scratch")
         self.assertEqual(simplified[0].points, detections[0].damage_polygon)
         self.assertEqual(
             simplified[0].model_dump(),
             {
-                "part_name": "left-fender",
+                "part_name": "Frontfender",
                 "damage_name": "scratch",
                 "points": detections[0].damage_polygon,
             },
@@ -299,7 +351,7 @@ class PartMatchingTests(unittest.TestCase):
         part_mask[30:60, 40:80] = 1
 
         roi = _damage_roi_from_parts(
-            [prediction("hood", part_mask)],
+            [prediction("Bonnet", part_mask)],
             (100, 120, 3),
             padding_ratio=0.10,
             min_padding=5,

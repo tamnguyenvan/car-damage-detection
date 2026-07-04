@@ -22,6 +22,23 @@ DAMAGE_CONFIDENCE_THRESHOLD = float(os.getenv("DAMAGE_CONFIDENCE_THRESHOLD", "0.
 DAMAGE_ROI_ENABLED = os.getenv("DAMAGE_ROI_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 DAMAGE_ROI_PADDING_RATIO = float(os.getenv("DAMAGE_ROI_PADDING_RATIO", "0.08"))
 DAMAGE_ROI_MIN_PADDING = int(os.getenv("DAMAGE_ROI_MIN_PADDING", "32"))
+DAMAGE_MIN_CLIPPED_AREA_RATIO = float(os.getenv("DAMAGE_MIN_CLIPPED_AREA_RATIO", "0.02"))
+EXPECTED_PART_CLASS_NAMES = (
+    "Bonnet",
+    "Frontbumper",
+    "Frontdoor",
+    "Frontfender",
+    "Headlights",
+    "Rearbumper",
+    "Reardoor",
+    "Rearfender",
+    "Rearlamp",
+    "Rockerpanel",
+    "Sidemirror",
+    "Trunklid",
+    "Wheel",
+    "Windshield",
+)
 
 DAMAGE_MODEL_PATH = os.getenv("DAMAGE_MODEL_PATH", os.getenv("MODEL_PATH", DEFAULT_DAMAGE_MODEL_PATH))
 PARTS_MODEL_PATH = os.getenv("PARTS_MODEL_PATH", DEFAULT_PARTS_MODEL_PATH)
@@ -86,6 +103,20 @@ def _class_name(names: Any, class_id: int) -> str:
     return str(class_id)
 
 
+def _class_names(names: Any) -> list[str]:
+    if isinstance(names, dict):
+        def sort_key(item: tuple[Any, Any]) -> tuple[int, int | str]:
+            try:
+                return 0, int(item[0])
+            except (TypeError, ValueError):
+                return 1, str(item[0])
+
+        return [str(name) for _, name in sorted(names.items(), key=sort_key)]
+    if isinstance(names, (list, tuple)):
+        return [str(name) for name in names]
+    return []
+
+
 def _normalize_damage_name(class_name: str) -> str:
     return " ".join(str(class_name).replace("_", " ").replace("-", " ").strip().lower().split())
 
@@ -109,6 +140,16 @@ def _load_parts_segmentation_model(model_path: str) -> YOLO:
     if model_task != "segment":
         raise ValueError(
             f"Expected a car-parts segmentation checkpoint, but loaded task={model_task!r}."
+        )
+    loaded_class_names = _class_names(getattr(model, "names", {}))
+    if loaded_class_names == list(EXPECTED_PART_CLASS_NAMES):
+        logger.info("Loaded car-parts classes: %s", loaded_class_names)
+    elif loaded_class_names:
+        logger.warning(
+            "Loaded car-parts checkpoint classes differ from the expected fine-tuned categories. "
+            "expected=%s loaded=%s",
+            list(EXPECTED_PART_CLASS_NAMES),
+            loaded_class_names,
         )
     return model
 
@@ -531,6 +572,50 @@ def _damage_area(damage: SegmentationPrediction) -> int:
     return int(np.asarray(damage.mask).astype(bool).sum())
 
 
+def _merge_duplicate_part_instances(
+    parts: list[SegmentationPrediction],
+    image_shape: tuple[int, int, int],
+) -> list[SegmentationPrediction]:
+    grouped_parts: dict[str, list[SegmentationPrediction]] = {}
+    for part in parts:
+        grouped_parts.setdefault(part.class_name, []).append(part)
+
+    merged_parts = []
+    for group in grouped_parts.values():
+        if len(group) == 1:
+            merged_parts.append(group[0])
+            continue
+
+        representative = max(group, key=lambda part: part.confidence)
+        masks = [
+            _mask_for_image(part.mask, image_shape)
+            for part in group
+            if part.mask is not None
+        ]
+        boxes = [part.box for part in group if len(part.box) == 4]
+
+        if masks:
+            merged_mask = np.logical_or.reduce(masks).astype(np.uint8)
+            box = _damage_box_from_mask(merged_mask) if merged_mask.any() else representative.box
+            polygon = _polygon_from_mask(merged_mask, merge_disconnected=True)
+        else:
+            merged_mask = None
+            box = _merge_boxes(boxes) if boxes else representative.box
+            polygon = representative.polygon
+
+        merged_parts.append(
+            SegmentationPrediction(
+                box=box,
+                confidence=representative.confidence,
+                class_id=representative.class_id,
+                class_name=representative.class_name,
+                mask=merged_mask,
+                polygon=polygon,
+            )
+        )
+    return merged_parts
+
+
 def _clip_damages_to_parts(
     damages: list[SegmentationPrediction],
     parts: list[SegmentationPrediction],
@@ -550,6 +635,10 @@ def _clip_damages_to_parts(
         damage_area = int(damage_mask.sum())
         if damage_area == 0:
             continue
+        min_clipped_area = max(
+            DAMAGE_MIN_AREA,
+            int(np.ceil(damage_area * DAMAGE_MIN_CLIPPED_AREA_RATIO)),
+        )
 
         assigned_mask = np.zeros_like(damage_mask, dtype=bool)
         for part_index, part in parts_by_confidence:
@@ -559,7 +648,7 @@ def _clip_damages_to_parts(
             clipped_mask = np.logical_and(damage_mask, part_mask)
             clipped_mask = np.logical_and(clipped_mask, ~assigned_mask)
             clipped_area = int(clipped_mask.sum())
-            if clipped_area < DAMAGE_MIN_AREA:
+            if clipped_area < min_clipped_area:
                 continue
 
             assigned_mask = np.logical_or(assigned_mask, clipped_mask)
@@ -698,6 +787,7 @@ def _assessment_detections(
     parts: list[SegmentationPrediction],
     image_shape: tuple[int, int, int],
 ) -> list[DetectionResult]:
+    parts = _merge_duplicate_part_instances(parts, image_shape)
     matched_damages = _clip_damages_to_parts(damages, parts, image_shape)
     filtered_damages = _suppress_lower_priority_damage(matched_damages)
     groups = _group_damage_by_part_and_class(filtered_damages)

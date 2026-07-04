@@ -37,12 +37,15 @@ export DAMAGE_MODEL_PATH="./models/car_damage_segformer"
 export PARTS_MODEL_PATH="./models/car_parts_yolo26_seg.pt"
 export DAMAGE_CONFIDENCE_THRESHOLD="0.30"
 export DAMAGE_MIN_AREA="16"
+export DAMAGE_MIN_CLIPPED_AREA_RATIO="0.02"
 export DAMAGE_ROI_ENABLED="true"
 export DAMAGE_ROI_PADDING_RATIO="0.08"
 export DAMAGE_ROI_MIN_PADDING="32"
 ```
 
 The damage path must be a Hugging Face SegFormer model directory. The car-parts checkpoint must have Ultralytics task `segment`. `MODEL_PATH` remains supported as a fallback for `DAMAGE_MODEL_PATH`. `DAMAGE_ROI_ENABLED` runs damage segmentation on a padded crop derived from detected car-part masks; set it to `false` to force full-image SegFormer inference.
+
+The current fine-tuned car-parts checkpoint is expected to use these 14 output categories: `Bonnet`, `Frontbumper`, `Frontdoor`, `Frontfender`, `Headlights`, `Rearbumper`, `Reardoor`, `Rearfender`, `Rearlamp`, `Rockerpanel`, `Sidemirror`, `Trunklid`, `Wheel`, and `Windshield`. The API returns the part names exactly as they are stored in the loaded checkpoint.
 
 ## Run with Docker
 
@@ -109,6 +112,8 @@ modal run modal_car_damage_detection_training.py
 # Vehicle-part segmentation, default YOLO26n-seg
 modal run modal_car_parts_segmentation_training.py
 ```
+
+For the current 14-class car-parts fine-tune, use `notebooks/car_parts_segmentation.ipynb` unless the Modal parts script has been updated to the same YOLOv8 dataset.
 
 Retrieve the checkpoints:
 

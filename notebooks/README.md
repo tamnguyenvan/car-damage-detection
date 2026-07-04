@@ -4,6 +4,7 @@ This project trains two segmentation models:
 
 - `modal_car_damage_detection_training.py`: SegFormer semantic damage segmentation on CarDD. Default model: `nvidia/mit-b2`.
 - `modal_car_parts_segmentation_training.py`: vehicle-part segmentation. Default model: `yolo26n-seg.pt`.
+- `car_parts_segmentation.ipynb`: notebook fine-tune for the current 14-class YOLOv8 car-parts dataset.
 
 Both models are required by the API. SegFormer produces semantic damage masks that the API splits into connected damage regions; YOLO26 still provides vehicle-part instance masks.
 
@@ -55,7 +56,9 @@ modal volume get car-damage-segformer-output-vol \
 
 ## Car-Parts Segmentation Training
 
-This app builds its own image from the same ZIP. Its Modal `run_function` selects the 21-class subset by annotation `classTitle`, converts it into YOLO segmentation labels, and bakes the result into that image. It uses the same deterministic 70%/20%/10% split policy. Model artifacts are stored only in `car-parts-segmentation-output-vol`.
+The current notebook fine-tune uses the Roboflow YOLOv8 export `car-parts-instance-segmentation.v3i.yolov8.zip`, downloaded from Google Drive, with these 14 classes: `Bonnet`, `Frontbumper`, `Frontdoor`, `Frontfender`, `Headlights`, `Rearbumper`, `Reardoor`, `Rearfender`, `Rearlamp`, `Rockerpanel`, `Sidemirror`, `Trunklid`, `Wheel`, and `Windshield`.
+
+The Modal training script in this directory still has its own conversion flow. Use `car_parts_segmentation.ipynb` for this 14-class fine-tune unless the Modal script is updated to the same YOLOv8 dataset.
 
 ```bash
 cd notebooks
@@ -90,6 +93,7 @@ export DAMAGE_MODEL_PATH="./models/car_damage_segformer"
 export PARTS_MODEL_PATH="./models/car_parts_yolo26_seg.pt"
 export DAMAGE_CONFIDENCE_THRESHOLD="0.30"
 export DAMAGE_MIN_AREA="16"
+export DAMAGE_MIN_CLIPPED_AREA_RATIO="0.02"
 export DAMAGE_ROI_ENABLED="true"
 export DAMAGE_ROI_PADDING_RATIO="0.08"
 export DAMAGE_ROI_MIN_PADDING="32"
