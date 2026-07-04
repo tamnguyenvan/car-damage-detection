@@ -40,7 +40,6 @@ export DAMAGE_MIN_AREA="16"
 export DAMAGE_ROI_ENABLED="true"
 export DAMAGE_ROI_PADDING_RATIO="0.08"
 export DAMAGE_ROI_MIN_PADDING="32"
-export PART_COVERAGE_THRESHOLD="0.50"
 ```
 
 The damage path must be a Hugging Face SegFormer model directory. The car-parts checkpoint must have Ultralytics task `segment`. `MODEL_PATH` remains supported as a fallback for `DAMAGE_MODEL_PATH`. `DAMAGE_ROI_ENABLED` runs damage segmentation on a padded crop derived from detected car-part masks; set it to `false` to force full-image SegFormer inference.

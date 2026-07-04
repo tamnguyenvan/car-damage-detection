@@ -25,7 +25,6 @@ DAMAGE_ROI_MIN_PADDING = int(os.getenv("DAMAGE_ROI_MIN_PADDING", "32"))
 
 DAMAGE_MODEL_PATH = os.getenv("DAMAGE_MODEL_PATH", os.getenv("MODEL_PATH", DEFAULT_DAMAGE_MODEL_PATH))
 PARTS_MODEL_PATH = os.getenv("PARTS_MODEL_PATH", DEFAULT_PARTS_MODEL_PATH)
-PART_COVERAGE_THRESHOLD = float(os.getenv("PART_COVERAGE_THRESHOLD", "0.50"))
 INFERENCE_IMAGE_SIZE = int(os.getenv("INFERENCE_IMAGE_SIZE", "640"))
 DAMAGE_SUPPRESSION_PRIORITY = {
     "scratch": 1,
@@ -334,7 +333,7 @@ def match_damage_to_part(
     damage_mask: Optional[np.ndarray],
     parts: list[SegmentationPrediction],
     image_shape: tuple[int, int] | tuple[int, int, int],
-    threshold: float = PART_COVERAGE_THRESHOLD,
+    threshold: float = 0.50,
 ) -> tuple[Optional[SegmentationPrediction], Optional[float], Optional[float]]:
     """Match by damage-mask containment and expose symmetric IoU for review."""
     if damage_mask is None:
@@ -532,24 +531,60 @@ def _damage_area(damage: SegmentationPrediction) -> int:
     return int(np.asarray(damage.mask).astype(bool).sum())
 
 
-def _match_damages_to_parts(
+def _clip_damages_to_parts(
     damages: list[SegmentationPrediction],
     parts: list[SegmentationPrediction],
     image_shape: tuple[int, int, int],
 ) -> list[MatchedDamage]:
-    part_index_by_identity = {id(part): index for index, part in enumerate(parts)}
+    """Split damage masks into part-owned intersections and drop unowned pixels."""
     matched_damages = []
+    parts_by_confidence = sorted(
+        enumerate(parts),
+        key=lambda item: item[1].confidence,
+        reverse=True,
+    )
     for damage in damages:
-        matched_part, coverage, iou = match_damage_to_part(damage.mask, parts, image_shape)
-        matched_damages.append(
-            MatchedDamage(
-                damage=damage,
-                matched_part=matched_part,
-                part_index=part_index_by_identity.get(id(matched_part)) if matched_part else None,
-                coverage=coverage,
-                iou=iou,
+        if damage.mask is None:
+            continue
+        damage_mask = _mask_for_image(damage.mask, image_shape)
+        damage_area = int(damage_mask.sum())
+        if damage_area == 0:
+            continue
+
+        assigned_mask = np.zeros_like(damage_mask, dtype=bool)
+        for part_index, part in parts_by_confidence:
+            if part.mask is None:
+                continue
+            part_mask = _mask_for_image(part.mask, image_shape)
+            clipped_mask = np.logical_and(damage_mask, part_mask)
+            clipped_mask = np.logical_and(clipped_mask, ~assigned_mask)
+            clipped_area = int(clipped_mask.sum())
+            if clipped_area < DAMAGE_MIN_AREA:
+                continue
+
+            assigned_mask = np.logical_or(assigned_mask, clipped_mask)
+            if clipped_area == damage_area and np.array_equal(clipped_mask, damage_mask):
+                clipped_damage = damage
+            else:
+                clipped_uint8 = clipped_mask.astype(np.uint8)
+                clipped_damage = SegmentationPrediction(
+                    box=_damage_box_from_mask(clipped_uint8),
+                    confidence=damage.confidence,
+                    class_id=damage.class_id,
+                    class_name=damage.class_name,
+                    mask=clipped_uint8,
+                    polygon=_polygon_from_mask(clipped_uint8),
+                )
+            coverage, iou = _mask_metrics(clipped_mask, part.mask, image_shape)
+            matched_damages.append(
+                MatchedDamage(
+                    damage=clipped_damage,
+                    matched_part=part,
+                    part_index=part_index,
+                    coverage=coverage,
+                    iou=iou,
+                )
             )
-        )
     return matched_damages
 
 
@@ -663,7 +698,7 @@ def _assessment_detections(
     parts: list[SegmentationPrediction],
     image_shape: tuple[int, int, int],
 ) -> list[DetectionResult]:
-    matched_damages = _match_damages_to_parts(damages, parts, image_shape)
+    matched_damages = _clip_damages_to_parts(damages, parts, image_shape)
     filtered_damages = _suppress_lower_priority_damage(matched_damages)
     groups = _group_damage_by_part_and_class(filtered_damages)
     return [_build_detection_from_group(group, image_shape) for group in groups]

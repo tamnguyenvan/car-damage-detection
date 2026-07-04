@@ -93,7 +93,6 @@ export DAMAGE_MIN_AREA="16"
 export DAMAGE_ROI_ENABLED="true"
 export DAMAGE_ROI_PADDING_RATIO="0.08"
 export DAMAGE_ROI_MIN_PADDING="32"
-export PART_COVERAGE_THRESHOLD="0.50"
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 

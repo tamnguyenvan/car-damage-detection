@@ -184,6 +184,69 @@ class PartMatchingTests(unittest.TestCase):
 
         self.assertEqual([detection.class_name for detection in detections], ["crack", "glass shatter"])
 
+    def test_assessment_splits_damage_across_intersecting_parts(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:40, 20:70] = 1
+        left_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        left_part_mask[:, :50] = 1
+        right_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        right_part_mask[:, 50:] = 1
+
+        detections = _assessment_detections(
+            [prediction("scratch", scratch_mask, class_id=5)],
+            [
+                prediction("left-fender", left_part_mask),
+                prediction("front-door", right_part_mask),
+            ],
+            (100, 100, 3),
+        )
+
+        detections_by_part = {detection.car_part: detection for detection in detections}
+        self.assertEqual(set(detections_by_part), {"left-fender", "front-door"})
+        self.assertEqual(detections_by_part["left-fender"].box, [20.0, 20.0, 50.0, 40.0])
+        self.assertEqual(detections_by_part["front-door"].box, [50.0, 20.0, 70.0, 40.0])
+        self.assertEqual(detections_by_part["left-fender"].part_coverage, 1.0)
+        self.assertEqual(detections_by_part["front-door"].part_coverage, 1.0)
+
+    def test_assessment_removes_damage_outside_all_parts(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[70:85, 70:85] = 1
+        part_mask = np.zeros((100, 100), dtype=np.uint8)
+        part_mask[10:60, 10:60] = 1
+
+        detections = _assessment_detections(
+            [prediction("scratch", scratch_mask, class_id=5)],
+            [prediction("left-fender", part_mask)],
+            (100, 100, 3),
+        )
+
+        self.assertEqual(detections, [])
+
+    def test_assessment_suppression_happens_after_part_clipping(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:40, 20:80] = 1
+        crack_mask = np.zeros((100, 100), dtype=np.uint8)
+        crack_mask[24:36, 24:44] = 1
+        left_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        left_part_mask[:, :50] = 1
+        right_part_mask = np.zeros((100, 100), dtype=np.uint8)
+        right_part_mask[:, 50:] = 1
+
+        detections = _assessment_detections(
+            [
+                prediction("scratch", scratch_mask, class_id=5),
+                prediction("crack", crack_mask, class_id=1),
+            ],
+            [
+                prediction("left-fender", left_part_mask),
+                prediction("front-door", right_part_mask),
+            ],
+            (100, 100, 3),
+        )
+
+        labels_by_part = {detection.car_part: detection.class_name for detection in detections}
+        self.assertEqual(labels_by_part, {"left-fender": "crack", "front-door": "scratch"})
+
     def test_semantic_damage_map_extracts_connected_components(self):
         semantic_map = np.zeros((100, 100), dtype=np.uint8)
         semantic_map[20:40, 30:50] = 1

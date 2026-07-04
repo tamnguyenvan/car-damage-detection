@@ -55,7 +55,7 @@ curl -X POST http://localhost:8000/predict \
       "damage_polygon": [[145.0, 255.0], [190.0, 245.0], [215.0, 290.0]],
       "car_part": "front_bumper",
       "part_confidence": 0.9123,
-      "part_coverage": 0.9431,
+      "part_coverage": 1.0,
       "part_iou": 0.0417,
       "car_part_polygon": [[124.0, 230.0], [348.0, 230.0], [350.0, 410.0]]
     }
@@ -66,21 +66,21 @@ curl -X POST http://localhost:8000/predict \
 
 ## Matching Semantics
 
-`part_coverage` is the fraction of damage-mask pixels inside the selected part mask: `intersection(damage, part) / area(damage)`. It is used for matching because vehicle-part masks are normally much larger than the contained damage mask.
+Before grouping and suppression, every raw damage mask is clipped to the area where it intersects each detected vehicle-part mask. Pixels that do not intersect any detected part are removed from the final response. If one raw damage crosses multiple parts, the API returns separate part-specific damage pieces.
 
-`part_iou` is also returned as the standard symmetric mask IoU: `intersection(damage, part) / union(damage, part)`. It is useful for auditing overlap, but is not used as the acceptance threshold because small damages would produce very low IoU values even when correctly matched.
+`part_coverage` is the fraction of the returned damage mask inside the selected part mask: `intersection(damage, part) / area(damage)`. Because returned damage masks are clipped to their matched part, this is normally `1.0` unless masks are resized or post-processed.
 
-Set `PART_COVERAGE_THRESHOLD` to control the minimum coverage needed for a matched part. The default is `0.50`.
+`part_iou` is also returned as the standard symmetric mask IoU: `intersection(damage, part) / union(damage, part)`. It is useful for auditing overlap, but is not used to decide part ownership because small damages would produce very low IoU values even when correctly clipped to a part.
 
-Set `DAMAGE_CONFIDENCE_THRESHOLD` to filter low-confidence SegFormer damage regions and `DAMAGE_MIN_AREA` to drop tiny connected components.
+Set `DAMAGE_CONFIDENCE_THRESHOLD` to filter low-confidence SegFormer damage regions and `DAMAGE_MIN_AREA` to drop tiny connected components or tiny clipped intersections with vehicle parts.
 
 By default, the API runs car-parts segmentation first, builds a padded ROI around the detected part masks, runs SegFormer on that crop, and maps damage masks back to original image coordinates. This preserves more detail for full-scene photos than resizing the whole image into SegFormer's input size. Set `DAMAGE_ROI_ENABLED=false` to disable the crop. Tune the crop with `DAMAGE_ROI_PADDING_RATIO` and `DAMAGE_ROI_MIN_PADDING`.
 
 ## Result Grouping
 
-Same-class damage regions on the same matched vehicle part are merged into one result. For example, multiple scratch components on `left-fender` become one result with `class_name: "scratch"`, `damage_label: "scratches"`, `damage_count` set to the number of merged scratch regions, and `display_label: "left-fender: scratches"`. The returned `box` spans the merged damage mask.
+After part clipping, same-class damage regions on the same matched vehicle part are merged into one result. For example, multiple scratch components on `left-fender` become one result with `class_name: "scratch"`, `damage_label: "scratches"`, `damage_count` set to the number of merged scratch regions, and `display_label: "left-fender: scratches"`. The returned `box` spans the merged damage mask.
 
-Within the same vehicle part, lower-priority surface damage is suppressed when a stronger related damage exists: `dent` suppresses `scratch`, and `crack` suppresses both `dent` and `scratch`. Other damage classes, such as `glass shatter`, `lamp broken`, and `tire flat`, are still reported independently.
+Within the same clipped vehicle part, lower-priority surface damage is suppressed when a stronger related damage exists: `dent` suppresses `scratch`, and `crack` suppresses both `dent` and `scratch`. Other damage classes, such as `glass shatter`, `lamp broken`, and `tire flat`, are still reported independently.
 
 ## Detection Fields
 
@@ -96,7 +96,7 @@ Within the same vehicle part, lower-priority surface damage is suppressed when a
 | `damage_polygon` | `number[][] | null` | Image-coordinate polygon of the damage mask. |
 | `car_part` | `string | null` | Matched vehicle-part class name. |
 | `part_confidence` | `number | null` | Matched part-segmentation confidence. |
-| `part_coverage` | `number | null` | Fraction of damage mask contained by the selected part mask. |
+| `part_coverage` | `number | null` | Fraction of the returned clipped damage mask contained by the selected part mask. |
 | `part_iou` | `number | null` | Symmetric mask IoU for the damage and selected part. |
 | `car_part_polygon` | `number[][] | null` | Image-coordinate polygon of the matched part mask. |
 
