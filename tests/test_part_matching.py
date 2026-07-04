@@ -14,6 +14,7 @@ from app.main import (
     _extract_damage_predictions_from_semantic_map,
     _project_damage_predictions_to_image,
     _segmentation_geometry_from_result,
+    _simplify_detections,
     match_damage_to_part,
 )
 
@@ -246,6 +247,32 @@ class PartMatchingTests(unittest.TestCase):
 
         labels_by_part = {detection.car_part: detection.class_name for detection in detections}
         self.assertEqual(labels_by_part, {"left-fender": "crack", "front-door": "scratch"})
+
+    def test_simplified_detections_keep_part_damage_and_points_only(self):
+        scratch_mask = np.zeros((100, 100), dtype=np.uint8)
+        scratch_mask[20:30, 20:30] = 1
+        part_mask = np.zeros((100, 100), dtype=np.uint8)
+        part_mask[10:60, 10:60] = 1
+
+        detections = _assessment_detections(
+            [prediction("scratch", scratch_mask, class_id=5)],
+            [prediction("left-fender", part_mask)],
+            (100, 100, 3),
+        )
+        simplified = _simplify_detections(detections)
+
+        self.assertEqual(len(simplified), 1)
+        self.assertEqual(simplified[0].part_name, "left-fender")
+        self.assertEqual(simplified[0].damage_name, "scratch")
+        self.assertEqual(simplified[0].points, detections[0].damage_polygon)
+        self.assertEqual(
+            simplified[0].model_dump(),
+            {
+                "part_name": "left-fender",
+                "damage_name": "scratch",
+                "points": detections[0].damage_polygon,
+            },
+        )
 
     def test_semantic_damage_map_extracts_connected_components(self):
         semantic_map = np.zeros((100, 100), dtype=np.uint8)

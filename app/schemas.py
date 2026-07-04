@@ -1,5 +1,19 @@
-from pydantic import BaseModel, Field
 from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class SimpleDetectionResult(BaseModel):
+    """
+    Minimal response item for client rendering.
+    """
+    part_name: Optional[str] = Field(default=None, description="Matched vehicle-part name")
+    damage_name: str = Field(..., description="Damage display name, pluralized when regions are merged")
+    points: Optional[List[List[float]]] = Field(
+        default=None,
+        description="Image-coordinate polygon points for the returned damage mask",
+    )
+
 
 class DetectionResult(BaseModel):
     """
@@ -40,10 +54,20 @@ class DetectionResult(BaseModel):
         description="Image-coordinate polygon of the matched car-part segmentation mask",
     )
 
+
 class InferenceResponse(BaseModel):
     """
     Standard API response schema for inference endpoints.
     """
     success: bool = Field(..., description="Status indicating successful execution")
     detections: List[DetectionResult] = Field(default_factory=list, description="List of detected damages")
+    error: Optional[str] = Field(default=None, description="Detailed error message if execution fails")
+
+
+class SimpleInferenceResponse(BaseModel):
+    """
+    Minimal API response shape used by default.
+    """
+    success: bool = Field(..., description="Status indicating successful execution")
+    detections: List[SimpleDetectionResult] = Field(default_factory=list, description="List of simplified detected damages")
     error: Optional[str] = Field(default=None, description="Detailed error message if execution fails")

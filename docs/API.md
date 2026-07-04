@@ -31,6 +31,8 @@ The service runs a Hugging Face SegFormer semantic-segmentation model for damage
 
 - `file`: image file with extension `.jpg`, `.jpeg`, `.png`, or `.webp`.
 
+Default simplified response:
+
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "accept: application/json" \
@@ -38,7 +40,34 @@ curl -X POST http://localhost:8000/predict \
   -F "file=@/path/to/damaged_car.jpg;type=image/jpeg"
 ```
 
-**Example response (200 OK)**:
+Full metadata response:
+
+```bash
+curl -X POST "http://localhost:8000/predict?response_mode=full" \
+  -H "accept: application/json" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@/path/to/damaged_car.jpg;type=image/jpeg"
+```
+
+`response_mode` can be `simple` or `full`. The default is `simple`.
+
+**Example simplified response (200 OK)**:
+
+```json
+{
+  "success": true,
+  "detections": [
+    {
+      "part_name": "front_bumper",
+      "damage_name": "dent",
+      "points": [[145.0, 255.0], [190.0, 245.0], [215.0, 290.0]]
+    }
+  ],
+  "error": null
+}
+```
+
+**Example full response (200 OK)**:
 
 ```json
 {
@@ -82,7 +111,15 @@ After part clipping, same-class damage regions on the same matched vehicle part 
 
 Within the same clipped vehicle part, lower-priority surface damage is suppressed when a stronger related damage exists: `dent` suppresses `scratch`, and `crack` suppresses both `dent` and `scratch`. Other damage classes, such as `glass shatter`, `lamp broken`, and `tire flat`, are still reported independently.
 
-## Detection Fields
+## Simplified Detection Fields
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `part_name` | `string | null` | Matched vehicle-part class name. `null` when no part is matched. |
+| `damage_name` | `string` | Damage display name, pluralized when multiple same-class regions are merged. |
+| `points` | `number[][] | null` | Image-coordinate polygon points for the returned clipped damage mask. |
+
+## Full Detection Fields
 
 | Field | Type | Description |
 | :--- | :--- | :--- |

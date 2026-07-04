@@ -103,6 +103,7 @@ def process_and_visualize(
     with open(image_path, "rb") as image_file:
         response = requests.post(
             API_URL,
+            params={"response_mode": "full"},
             files={"file": (os.path.basename(image_path), image_file, content_type)},
             timeout=60,
         )

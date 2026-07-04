@@ -2,17 +2,17 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
 
-from app.schemas import DetectionResult, InferenceResponse
+from app.schemas import DetectionResult, InferenceResponse, SimpleDetectionResult, SimpleInferenceResponse
 
 SERVICE_NAME = "car_damage_assessment"
 DEFAULT_DAMAGE_MODEL_PATH = "/app/models/car_damage_segformer"
@@ -704,13 +704,30 @@ def _assessment_detections(
     return [_build_detection_from_group(group, image_shape) for group in groups]
 
 
+def _simplify_detections(detections: list[DetectionResult]) -> list[SimpleDetectionResult]:
+    return [
+        SimpleDetectionResult(
+            part_name=detection.car_part,
+            damage_name=detection.damage_label or detection.class_name,
+            points=detection.damage_polygon,
+        )
+        for detection in detections
+    ]
+
+
 @app.post(
     "/predict",
-    response_model=InferenceResponse,
+    response_model=InferenceResponse | SimpleInferenceResponse,
     status_code=status.HTTP_200_OK,
     summary="Segment car damage and attribute each damage mask to a vehicle part",
 )
-async def predict_damage(file: UploadFile = File(...)):
+async def predict_damage(
+    file: UploadFile = File(...),
+    response_mode: Literal["simple", "full"] = Query(
+        default="simple",
+        description="Use 'simple' for minimal client data or 'full' for metadata-rich detections.",
+    ),
+):
     logger.info("Received inference request for file: '%s'", file.filename)
 
     allowed_extensions = {".jpg", ".jpeg", ".png", ".webp"}
@@ -769,6 +786,8 @@ async def predict_damage(file: UploadFile = File(...)):
         detections = _assessment_detections(damages, parts, image.shape)
 
         logger.info("Inference executed. Segmented %d damage instance(s).", len(detections))
+        if response_mode == "simple":
+            return SimpleInferenceResponse(success=True, detections=_simplify_detections(detections))
         return InferenceResponse(success=True, detections=detections)
     except HTTPException:
         raise
