@@ -1,4 +1,6 @@
 import argparse
+import colorsys
+import hashlib
 import mimetypes
 import os
 import sys
@@ -9,72 +11,46 @@ import requests
 
 API_URL = "http://localhost:8000/predict"
 WINDOW_NAME = "Car Damage Assessment"
-DAMAGE_COLOR = (36, 39, 235)
-DAMAGE_MASK_COLOR = (0, 140, 255)
-PART_MASK_COLOR = (42, 180, 42)
-TEXT_COLOR = (255, 255, 255)
+LEGEND_BG_COLOR = (0, 0, 0)
+
+# Pre-defined palette — must match DAMAGE_CLASSES from the training script.
+# Colors chosen to stand out against typical vehicle colors
+# (white, black, silver, gray, red, blue, etc.).
+_PREDEFINED_COLORS: dict[str, tuple[int, int, int]] = {
+    "crack":         (255, 0, 255),     # Magenta / Fuchsia
+    "dent":          (255, 255, 0),     # Cyan
+    "scratch":       (0, 255, 50),      # Lime / Neon Green
+    "glass shatter": (220, 0, 220),     # Bright Purple
+    "lamp broken":   (100, 140, 255),   # Coral / Salmon
+    "tire flat":     (200, 255, 0),     # Turquoise
+}
 
 
-def _draw_label(image, lines: list[str], x: int, y: int, color: tuple[int, int, int]) -> None:
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.5
-    thickness = 1
-    padding = 5
-    line_height = 19
-    image_height, image_width = image.shape[:2]
-    text_width = max(cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines)
-    text_height = line_height * len(lines) + padding * 2
+def _get_damage_color(class_name: str) -> tuple[int, int, int]:
+    """Return a consistent, distinct color for any damage class name via hashing."""
+    key = class_name.lower().strip()
+    if key in _PREDEFINED_COLORS:
+        return _PREDEFINED_COLORS[key]
 
-    label_x = max(0, min(x, image_width - text_width - padding * 2))
-    label_y = y - text_height - 3
-    if label_y < 0:
-        label_y = min(image_height - text_height, y + 3)
+    # Hash the class name to generate stable, well-separated RGB values
+    digest = hashlib.md5(key.encode()).digest()
+    # Use 3 bytes for hue-ish spacing, ensure vivid colors (avoid grey/muddy)
+    h = digest[0] / 255.0                     # hue-like 0-1
+    s = 0.55 + (digest[1] / 255.0) * 0.45    # saturation 0.55-1.0 (vivid)
+    v = 0.60 + (digest[2] / 255.0) * 0.40    # value 0.60-1.0 (not too dark)
 
-    cv2.rectangle(
-        image,
-        (label_x, label_y),
-        (label_x + text_width + padding * 2, label_y + text_height),
-        color,
-        thickness=-1,
-    )
-    for index, line in enumerate(lines):
-        text_y = label_y + padding + (index + 1) * line_height - 4
-        cv2.putText(image, line, (label_x + padding, text_y), font, font_scale, TEXT_COLOR, thickness)
+    # HSV → RGB (BGR for OpenCV)
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(b * 255), int(g * 255), int(r * 255))
 
 
-def _draw_detection(image, detection: dict) -> None:
-    image_height, image_width = image.shape[:2]
-    x1, y1, x2, y2 = [int(round(value)) for value in detection["box"]]
-    x1 = max(0, min(x1, image_width - 1))
-    y1 = max(0, min(y1, image_height - 1))
-    x2 = max(0, min(x2, image_width - 1))
-    y2 = max(0, min(y2, image_height - 1))
-
-    damage_name = detection.get("damage_label") or detection["class_name"]
-    car_part = detection.get("car_part")
-    summary_label = detection.get("display_label")
-    if car_part:
-        summary_label = summary_label or f"{car_part}: {damage_name}"
-        part_confidence = detection.get("part_confidence")
-        coverage = detection.get("part_coverage")
-        iou = detection.get("part_iou")
-        part_label = f"Part: {car_part}"
-        if part_confidence is not None:
-            part_label += f" {part_confidence:.2f}"
-        if coverage is not None:
-            part_label += f" | coverage {coverage:.2f}"
-        if iou is not None:
-            part_label += f" | IoU {iou:.2f}"
-    else:
-        summary_label = summary_label or f"Damage: {damage_name}"
-        part_label = "Part: no match"
-    damage_label = f"{summary_label} {detection['confidence']:.2f}"
-
-    cv2.rectangle(image, (x1, y1), (x2, y2), DAMAGE_COLOR, thickness=2)
-    _draw_label(image, [damage_label, part_label], x1, y1, DAMAGE_COLOR)
+def _format_class_name(name: str) -> str:
+    """Convert snake_case or lowercase to Title Case for display."""
+    return name.replace("_", " ").title()
 
 
-def _draw_segmentation(image, polygon, color: tuple[int, int, int]) -> None:
+def _draw_damage_mask(image, polygon, color: tuple[int, int, int]) -> None:
+    """Draw a prominent damage mask overlay."""
     if not polygon:
         return
 
@@ -82,10 +58,148 @@ def _draw_segmentation(image, polygon, color: tuple[int, int, int]) -> None:
     if points.ndim != 2 or len(points) < 3 or points.shape[1] != 2:
         return
 
+    # Semi-transparent fill
     overlay = image.copy()
     cv2.fillPoly(overlay, [points], color)
-    cv2.addWeighted(overlay, 0.30, image, 0.70, 0, image)
-    cv2.polylines(image, [points], isClosed=True, color=color, thickness=2)
+    cv2.addWeighted(overlay, 0.42, image, 0.58, 0, image)
+
+
+def _draw_legend(image, detections: list[dict], position: str = "top-right") -> None:
+    """Draw a legend panel at the chosen corner: top-left, top-right, bottom-left, bottom-right."""
+    image_height, image_width = image.shape[:2]
+
+    # Collect unique (damage, part) pairs with their colors
+    entries: list[tuple[str, tuple[int, int, int]]] = []
+    seen: set[tuple[str, str]] = set()
+    for det in detections:
+        dn = det.get("damage_label") or det["class_name"]
+        damage_name = _format_class_name(dn)
+        part_name = _format_class_name(det.get("car_part") or "unknown part")
+        key = (damage_name, part_name)
+        if key not in seen:
+            seen.add(key)
+            label = f"{damage_name}  -  {part_name}"
+            entries.append((label, _get_damage_color(dn)))
+
+    if not entries:
+        return
+
+    entries.sort(key=lambda x: x[0])
+
+    # ------ Panel layout: right side, sized to content ------
+    font = cv2.FONT_HERSHEY_DUPLEX
+    font_thickness = 2
+    pad = max(8, image_width // 100)
+    swatch_sz = max(18, image_height // 28)
+    gap = max(6, image_width // 160)
+
+    # Determine font scale by fitting the longest label within a max text width budget.
+    # The panel itself can be at most ~1/3 of image width; the text portion is
+    # panel_w - (pad + swatch_sz + gap + pad).  We target ~28% of image width for
+    # the text to leave headroom for the swatch and padding.
+    max_text_width = int(image_width * 0.25)
+
+    item_scale = 1.0
+    max_label_width = 0
+    max_label_height = 0
+    for label, _ in entries:
+        for scale in (0.65, 0.60, 0.55, 0.50, 0.45, 0.40, 0.35):
+            (tw, th_item), baseline = cv2.getTextSize(label, font, scale, font_thickness)
+            if tw <= max_text_width:
+                max_label_width = max(max_label_width, tw)
+                max_label_height = max(max_label_height, th_item + baseline)
+                item_scale = min(item_scale, scale)
+                break
+        else:
+            # Fallback – use the smallest scale we're willing to render
+            (tw, th_item), baseline = cv2.getTextSize(label, font, 0.35, font_thickness)
+            max_label_width = max(max_label_width, tw)
+            max_label_height = max(max_label_height, th_item + baseline)
+            item_scale = min(item_scale, 0.35)
+
+    # Panel width = left-pad + swatch + gap + max-text-width + right-pad
+    panel_w = pad + swatch_sz + gap + max_label_width + pad
+    # Clamp: at least 1/6 of image width, at most 1/3
+    panel_w = max(image_width // 6, min(panel_w, image_width // 3))
+
+    # Title
+    title = "LEGEND"
+    title_scale = min(item_scale * 1.2, panel_w / 280.0, 0.75)
+    (tw_title, th_title), _ = cv2.getTextSize(title, font, title_scale, font_thickness)
+    title_y = pad + th_title
+    divider_y = title_y + max(6, image_height // 70)
+
+    # Row height: the larger of the swatch or the text block (text height + a
+    # small gap so rows never touch). This guarantees text is never clipped.
+    row_text_height = max_label_height + max(3, image_height // 120)
+    row_h = max(swatch_sz, row_text_height)
+    # Extra vertical gap between rows for readability
+    row_spacing = row_h + max(2, image_height // 160)
+
+    # Total panel height
+    panel_h = divider_y + pad + len(entries) * row_spacing + pad
+
+    # Position the panel in the chosen corner
+    position = position.lower().replace("_", "-")
+    if position in ("top-right", "right-top"):
+        px = image_width - panel_w - pad
+        py = pad
+    elif position in ("top-left", "left-top"):
+        px = pad
+        py = pad
+    elif position in ("bottom-right", "right-bottom"):
+        px = image_width - panel_w - pad
+        py = image_height - panel_h - pad
+    elif position in ("bottom-left", "left-bottom"):
+        px = pad
+        py = image_height - panel_h - pad
+    else:
+        # Fallback to top-right
+        px = image_width - panel_w - pad
+        py = pad
+
+    # Dark background
+    overlay = image.copy()
+    cv2.rectangle(overlay, (px, py), (px + panel_w, py + panel_h),
+                  LEGEND_BG_COLOR, thickness=-1)
+    cv2.addWeighted(overlay, 0.72, image, 0.28, 0, image)
+
+    # Subtle border
+    cv2.rectangle(image, (px, py), (px + panel_w, py + panel_h), (80, 80, 80), 1)
+
+    # Title – centered horizontally
+    title_x = px + (panel_w - tw_title) // 2
+    cv2.putText(image, title, (title_x, title_y), font, title_scale,
+                (220, 220, 220), font_thickness, lineType=cv2.LINE_AA)
+
+    # Divider line under title
+    cv2.line(image, (px + pad, divider_y), (px + panel_w - pad, divider_y),
+             (100, 100, 100), 1)
+
+    # Damage entries
+    cur_y = divider_y + pad
+    for name, color in entries:
+        # Color swatch – vertically centred within row_h
+        swatch_y = cur_y + (row_h - swatch_sz) // 2
+        cv2.rectangle(image, (px + pad, swatch_y),
+                      (px + pad + swatch_sz, swatch_y + swatch_sz), color,
+                      thickness=-1)
+        cv2.rectangle(image, (px + pad, swatch_y),
+                      (px + pad + swatch_sz, swatch_y + swatch_sz),
+                      (230, 230, 230), 1)
+
+        # Text – baseline aligned to swatch centre for a natural look
+        (tw_item, th_item), baseline = cv2.getTextSize(name, font, item_scale,
+                                                       font_thickness)
+        text_x = px + pad + swatch_sz + gap
+        # Place text so its vertical centre aligns with the swatch centre.
+        # cv2.putText positions by the text *baseline* (bottom-left corner).
+        # We want:    baseline = swatch_mid  +  (th_item / 2)
+        text_y = cur_y + row_h // 2 + th_item // 2
+        cv2.putText(image, name, (text_x, text_y), font, item_scale,
+                    (245, 245, 245), font_thickness, lineType=cv2.LINE_AA)
+
+        cur_y += row_spacing
 
 
 def process_and_visualize(
@@ -94,6 +208,7 @@ def process_and_visualize(
     window_width: int = 1280,
     window_height: int = 800,
     show_window: bool = True,
+    legend_position: str = "top-right",
 ) -> None:
     if not os.path.isfile(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -138,9 +253,12 @@ def process_and_visualize(
             f"  {index}. damage={damage_name} ({detection['confidence']:.2f}{count_details}), "
             f"car part={car_part}{match_details}"
         )
-        _draw_segmentation(image, detection.get("damage_polygon"), DAMAGE_MASK_COLOR)
-        _draw_segmentation(image, detection.get("car_part_polygon"), PART_MASK_COLOR)
-        _draw_detection(image, detection)
+        # Draw damage area with prominent highlighting
+        _draw_damage_mask(image, detection.get("damage_polygon"),
+                          _get_damage_color(damage_name))
+
+    # Draw legend
+    _draw_legend(image, detections, position=legend_position)
 
     output_filename = ""
     if save_result:
@@ -167,6 +285,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-show", action="store_true", help="Do not open the OpenCV visualization window")
     parser.add_argument("--window-width", type=int, default=1280, help="Initial OpenCV window width")
     parser.add_argument("--window-height", type=int, default=800, help="Initial OpenCV window height")
+    parser.add_argument("--legend-position", default="top-right",
+                        choices=["top-left", "top-right", "bottom-left", "bottom-right"],
+                        help="Corner to place the legend panel")
     args = parser.parse_args()
 
     try:
@@ -176,6 +297,7 @@ if __name__ == "__main__":
             window_width=args.window_width,
             window_height=args.window_height,
             show_window=not args.no_show,
+            legend_position=args.legend_position,
         )
     except (FileNotFoundError, requests.RequestException, RuntimeError) as exc:
         print(f"[ERROR] {exc}")
